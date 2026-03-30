@@ -19,12 +19,20 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bsreal.robot_data.openarm_data import make_openarm_single_arm_ir
+from bsreal.dynamics.mass_matrix import compute_mass_matrix
+from bsreal.dynamics.coupling import normalized_coupling_matrix
 from bsreal.experiment.perturbation import (
     PerturbationConfig,
     run_perturbation_trial,
-    compute_theoretical_coupling,
 )
 from bsreal.experiment.safety import slow_move
+
+
+def compute_theoretical_coupling(ir, q_rad):
+    """Compute M and J at given configuration."""
+    M = compute_mass_matrix(ir, q_rad)
+    J = normalized_coupling_matrix(M)
+    return {"M_matrix": M.tolist(), "J_matrix": J.tolist()}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,9 +44,9 @@ def main():
     parser = argparse.ArgumentParser(description="OpenArm elbow configuration sweep")
     parser.add_argument("--port", default="can0")
     parser.add_argument("--side", default="right")
-    parser.add_argument("--sweep-min", type=float, default=-60.0, help="Elbow min (deg)")
-    parser.add_argument("--sweep-max", type=float, default=60.0, help="Elbow max (deg)")
-    parser.add_argument("--sweep-steps", type=int, default=21)
+    parser.add_argument("--sweep-min", type=float, default=0.0, help="Elbow min (deg), j4 limit=0")
+    parser.add_argument("--sweep-max", type=float, default=120.0, help="Elbow max (deg), j4 limit=135")
+    parser.add_argument("--sweep-steps", type=int, default=13)
     parser.add_argument("--perturb-joint", type=int, default=0, help="Joint to perturb (idx)")
     parser.add_argument("--amplitude", type=float, default=3.0)
     parser.add_argument("--frequency", type=float, default=0.5)
