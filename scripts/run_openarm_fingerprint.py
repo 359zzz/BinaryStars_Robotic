@@ -105,6 +105,7 @@ def execute_motion_with_recording(robot, motion_name, motion_def, dt=0.02):
         n_steps = max(int(seg_dur / dt), 1)
 
         logger.info(f"  Segment {seg_idx}: {wp_start} → {wp_end}")
+        time.sleep(0.5)  # let CAN buffer drain between segments
 
         t0 = time.monotonic()
         for step in range(n_steps + 1):
@@ -115,6 +116,7 @@ def execute_motion_with_recording(robot, motion_name, motion_def, dt=0.02):
             cmd["gripper.pos"] = gripper_pos
 
             robot.send_action(cmd)
+            time.sleep(0.005)  # brief pause before reading
             obs = robot.get_observation()
 
             t_now = time.monotonic() - t0 + t_global
@@ -122,12 +124,12 @@ def execute_motion_with_recording(robot, motion_name, motion_def, dt=0.02):
             positions_deg.append([obs.get(f"{jn}.pos", 0.0) for jn in JOINT_NAMES])
             torques_Nm.append([obs.get(f"{jn}.torque", 0.0) for jn in JOINT_NAMES])
 
+            target_t = (step + 1) * dt
             elapsed = time.monotonic() - t0
-            target_t = step * dt
             if target_t > elapsed:
                 time.sleep(target_t - elapsed)
 
-        t_global += seg_dur
+        t_global += time.monotonic() - t0
 
     logger.info(f"  Recorded {len(timestamps)} samples over {t_global:.1f}s")
 
