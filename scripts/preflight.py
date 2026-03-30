@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Pre-flight check: connect to robot, read state, do micro-motion test."""
+
+import argparse
+import math
+import sys
+import time
+
+
+def preflight_openarm(port: str, side: str = "right"):
+    from lerobot.robots.openarm_follower import OpenArmFollower, OpenArmFollowerConfig
+
+    config = OpenArmFollowerConfig(port=port, side=side, id="preflight_check")
+    robot = OpenArmFollower(config)
+
+    print(f"[1/4] Connecting to OpenArm on {port} ({side})...")
+    robot.connect()
+    print("  OK: connected")
+
+    print("[2/4] Reading joint state...")
+    obs = robot.get_observation()
+    joint_names = [f"joint_{i}" for i in range(1, 8)]
+    for jn in joint_names:
+        pos = obs.get(f"{jn}.pos", float("nan"))
+        vel = obs.get(f"{jn}.vel", float("nan"))
+        tau = obs.get(f"{jn}.torque", float("nan"))
+        print(f"  {jn}: pos={pos:+7.2f} deg  vel={vel:+7.2f} deg/s  tau={tau:+6.3f} Nm")
+    gripper = obs.get("gripper.pos", float("nan"))
+    print(f"  gripper: pos={gripper:.2f} deg")
+
+    print("[3/4] Micro-motion test (joint_1 +1 deg, then back)...")
+    base_pos = obs["joint_1.pos"]
+    target = {f"{jn}.pos": obs[f"{jn}.pos"] for jn in joint_names}
+    target["gripper.pos"] = obs["gripper.pos"]
+
+    # Move +1 degree
+    target["joint_1.pos"] = base_pos + 1.0
+    robot.send_action(target)
+    time.sleep(0.5)
+
+    obs2 = robot.get_observation()
+    delta = obs2["joint_1.pos"] - base_pos
+    print(f"  Commanded +1.0 deg, measured delta = {delta:+.2f} deg")
+
+    # Move back
+    target["joint_1.pos"] = base_pos
+    robot.send_action(target)
+    time.sleep(0.5)
+
+    if abs(delta) < 0.3:
+        print("  WARNING: small response. Check motor enable / calibration.")
+    elif abs(delta - 1.0) < 0.5:
+        print("  OK: motor responding correctly")
+    else:
+        print(f"  WARNING: unexpected delta {delta:.2f}")
+
+    print("[4/4] Disconnecting...")
+    robot.disconnect()
+    print("  OK: pre-flight PASSED\n")
+
+
+def preflight_piper(port: str):
+    from lerobot.robots.piper_follower import PiperFollower, PiperFollowerConfig
+
+    config = PiperFollowerConfig(port=port, id="preflight_check")
+    robot = PiperFollower(config)
+
+    print(f"[1/3] Connecting to Piper on {port}...")
+    robot.connect()
+    print("  OK: connected")
+
+    print("[2/3] Reading joint state...")
+    obs = robot.get_observation()
+    for i in range(1, 7):
+        pos = obs.get(f"joint_{i}.pos", float("nan"))
+        print(f"  joint_{i}: pos={pos:+7.2f} deg")
+    print(f"  gripper: pos={obs.get('gripper.pos', float('nan')):.2f} deg")
+
+    print("[3/3] Disconnecting...")
+    robot.disconnect()
+    print("  OK: pre-flight PASSED\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pre-flight robot check")
+    parser.add_argument("--robot", choices=["openarm", "piper"], required=True)
+    parser.add_argument("--port", default="can0", help="CAN interface name")
+    parser.add_argument("--side", default="right", help="OpenArm side (left/right)")
+    args = parser.parse_args()
+
+    try:
+        if args.robot == "openarm":
+            preflight_openarm(args.port, args.side)
+        else:
+            preflight_piper(args.port)
+    except Exception as e:
+        print(f"\nPRE-FLIGHT FAILED: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,7 @@
+# Core (needed on both IPC and Windows)
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+
+# Robot control (needed on Ubuntu IPC only — already installed via Evo-RL)
+# lerobot  # pip install -e path/to/Evo-RL-main
