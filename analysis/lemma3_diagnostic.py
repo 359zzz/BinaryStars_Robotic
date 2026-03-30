@@ -135,7 +135,7 @@ def main():
         "own_arm_amps": all_own,
         "cross_arm_amps": all_cross,
         "overall_ratio": overall_ratio,
-        "lemma3_verified": overall_ratio > 10,
+        "lemma3_verified": bool(overall_ratio > 10),
     }
     out = Path("results/lemma3_diagnostic_summary.json")
     with open(out, "w") as f:
