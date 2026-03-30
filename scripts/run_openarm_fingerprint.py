@@ -74,7 +74,7 @@ MOTIONS = {
 }
 
 
-def execute_motion_with_recording(robot, motion_name, motion_def, dt=0.01):
+def execute_motion_with_recording(robot, motion_name, motion_def, dt=0.02):
     """Execute motion waypoints, recording q(t) continuously."""
     waypoints = motion_def["waypoints"]
     seg_dur = motion_def["segment_duration_s"]
