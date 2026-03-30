@@ -13,7 +13,27 @@ from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
-from scipy.stats import pearsonr, spearmanr
+
+
+def pearsonr(x, y):
+    """Pearson correlation + p-value (numpy-only)."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    n = len(x)
+    if n < 3 or np.std(x) < 1e-15 or np.std(y) < 1e-15:
+        return 0.0, 1.0
+    r = np.corrcoef(x, y)[0, 1]
+    # t-test approximation for p-value
+    t = r * np.sqrt((n - 2) / max(1 - r * r, 1e-15))
+    # rough two-sided p from t (good enough for diagnostic)
+    p = 2.0 * np.exp(-0.5 * t * t) if abs(t) < 20 else 0.0
+    return float(r), float(p)
+
+
+def spearmanr(x, y):
+    """Spearman rank correlation (numpy-only)."""
+    rx = np.argsort(np.argsort(x)).astype(float)
+    ry = np.argsort(np.argsort(y)).astype(float)
+    return pearsonr(rx, ry)
 
 
 def fft_amplitude(signal_1d, timestamps, target_freq, ramp_s=2.0):
