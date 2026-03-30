@@ -112,8 +112,8 @@ def run_cross_arm_trial(robot, perturb_arm: str, perturb_joint_idx: int, args):
 
 def main():
     parser = argparse.ArgumentParser(description="Dual-arm Lemma 3 verification")
-    parser.add_argument("--left-port", default="can0", help="Left arm CAN port")
-    parser.add_argument("--right-port", default="can1", help="Right arm CAN port")
+    parser.add_argument("--left-port", default="can1", help="Left arm CAN port")
+    parser.add_argument("--right-port", default="can0", help="Right arm CAN port")
     parser.add_argument("--amplitude", type=float, default=3.0)
     parser.add_argument("--frequency", type=float, default=0.5)
     parser.add_argument("--duration", type=float, default=10.0)
@@ -130,8 +130,8 @@ def main():
     )
 
     config = BiOpenArmFollowerConfig(
-        left_arm_config=OpenArmFollowerConfigBase(port=args.left_port),
-        right_arm_config=OpenArmFollowerConfigBase(port=args.right_port),
+        left_arm_config=OpenArmFollowerConfigBase(port=args.left_port, side="left"),
+        right_arm_config=OpenArmFollowerConfigBase(port=args.right_port, side="right"),
         id="lemma3_exp",
     )
     robot = BiOpenArmFollower(config)
