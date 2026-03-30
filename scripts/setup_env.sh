@@ -9,11 +9,15 @@
 
 set -euo pipefail
 
-# ── CAN interface names ──────────────────────────────────────────────
-export OLD_RIGHT=can0   # Right follower arm
-export OLD_LEFT=can1    # Left follower arm
-export NEW_RIGHT=can2   # Right leader arm
-export NEW_LEFT=can3    # Left leader arm
+# ── CAN interface names (OpenArm) ────────────────────────────────────
+export OLD_RIGHT=can0   # OpenArm right follower
+export OLD_LEFT=can1    # OpenArm left follower
+export NEW_RIGHT=can2   # OpenArm right leader
+export NEW_LEFT=can3    # OpenArm left leader
+
+# ── CAN interface names (Piper) ─────────────────────────────────────
+export PIPER_LEADER=can1    # Piper leader arm
+export PIPER_FOLLOWER=can2  # Piper follower arm
 
 # ── Python environment ───────────────────────────────────────────────
 export LEROBOT_PY=/home/whz/miniconda/envs/lerobot/bin/python
@@ -26,8 +30,17 @@ export PYTHONPATH="${BSREAL_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 
 # ── CAN bus initialisation ───────────────────────────────────────────
 init_can() {
-    echo "Initialising CAN FD interfaces..."
-    for IF in ${OLD_RIGHT} ${OLD_LEFT} ${NEW_RIGHT} ${NEW_LEFT}; do
+    local MODE="${1:-all}"  # all, openarm, piper
+    echo "Initialising CAN FD interfaces (mode=$MODE)..."
+
+    local INTERFACES=""
+    case "$MODE" in
+        openarm) INTERFACES="${OLD_RIGHT} ${OLD_LEFT} ${NEW_RIGHT} ${NEW_LEFT}" ;;
+        piper)   INTERFACES="${PIPER_LEADER} ${PIPER_FOLLOWER}" ;;
+        all)     INTERFACES="${OLD_RIGHT} ${OLD_LEFT} ${NEW_RIGHT} ${NEW_LEFT} ${PIPER_LEADER} ${PIPER_FOLLOWER}" ;;
+    esac
+
+    for IF in $INTERFACES; do
         if ip link show "$IF" &>/dev/null; then
             sudo ip link set "$IF" down 2>/dev/null || true
             sudo ip link set "$IF" type can bitrate 1000000 dbitrate 5000000 fd on
@@ -66,7 +79,7 @@ run() {
 # ── Main ─────────────────────────────────────────────────────────────
 case "${1:-}" in
     init)
-        init_can
+        init_can "${2:-all}"
         ;;
     check)
         check_can
@@ -84,9 +97,9 @@ case "${1:-}" in
         ;;
     *)
         echo "Usage:"
-        echo "  source $0           # export environment variables"
-        echo "  $0 init             # initialise CAN FD interfaces (needs sudo)"
-        echo "  $0 check            # check CAN interface status"
-        echo "  $0 run <script> ... # run a Python script with correct env"
+        echo "  source $0                # export environment variables"
+        echo "  $0 init [all|openarm|piper]  # init CAN interfaces (needs sudo)"
+        echo "  $0 check                # check CAN interface status"
+        echo "  $0 run <script> ...      # run a Python script with correct env"
         ;;
 esac

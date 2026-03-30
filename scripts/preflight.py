@@ -59,24 +59,57 @@ def preflight_openarm(port: str, side: str = "right"):
     print("  OK: pre-flight PASSED\n")
 
 
-def preflight_piper(port: str):
+def preflight_piper(port: str, speed_ratio: int = 35):
     from lerobot.robots.piper_follower import PiperFollower, PiperFollowerConfig
 
-    config = PiperFollowerConfig(port=port, id="preflight_check")
+    config = PiperFollowerConfig(
+        port=port,
+        id="preflight_check",
+        speed_ratio=speed_ratio,
+        high_follow=False,
+        require_calibration=False,
+        startup_sleep_s=0.5,
+        sync_gripper=True,
+    )
     robot = PiperFollower(config)
 
-    print(f"[1/3] Connecting to Piper on {port}...")
+    print(f"[1/4] Connecting to Piper on {port} (speed_ratio={speed_ratio})...")
     robot.connect()
     print("  OK: connected")
 
-    print("[2/3] Reading joint state...")
+    print("[2/4] Reading joint state...")
     obs = robot.get_observation()
-    for i in range(1, 7):
-        pos = obs.get(f"joint_{i}.pos", float("nan"))
-        print(f"  joint_{i}: pos={pos:+7.2f} deg")
+    joint_names = [f"joint_{i}" for i in range(1, 7)]
+    for jn in joint_names:
+        pos = obs.get(f"{jn}.pos", float("nan"))
+        print(f"  {jn}: pos={pos:+7.2f} deg")
     print(f"  gripper: pos={obs.get('gripper.pos', float('nan')):.2f} deg")
 
-    print("[3/3] Disconnecting...")
+    print("[3/4] Micro-motion test (joint_1 +1 deg, then back)...")
+    base_pos = obs["joint_1.pos"]
+    target = {f"{jn}.pos": obs[f"{jn}.pos"] for jn in joint_names}
+    target["gripper.pos"] = obs.get("gripper.pos", 0.0)
+
+    target["joint_1.pos"] = base_pos + 1.0
+    robot.send_action(target)
+    time.sleep(0.5)
+
+    obs2 = robot.get_observation()
+    delta = obs2["joint_1.pos"] - base_pos
+    print(f"  Commanded +1.0 deg, measured delta = {delta:+.2f} deg")
+
+    target["joint_1.pos"] = base_pos
+    robot.send_action(target)
+    time.sleep(0.5)
+
+    if abs(delta) < 0.3:
+        print("  WARNING: small response. Check motor enable / connection.")
+    elif abs(delta - 1.0) < 0.5:
+        print("  OK: motor responding correctly")
+    else:
+        print(f"  WARNING: unexpected delta {delta:.2f}")
+
+    print("[4/4] Disconnecting...")
     robot.disconnect()
     print("  OK: pre-flight PASSED\n")
 

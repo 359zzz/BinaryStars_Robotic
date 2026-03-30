@@ -51,14 +51,11 @@ echo ""
 echo ">>> Step 3: Elbow configuration sweep"
 $PYTHON scripts/run_openarm_sweep.py --port can0 --side right $DRY_RUN
 
-# ── Step 4: Piper (optional, position-only) ─────────────────────────
-# Uncomment if Piper is connected:
-# echo ""
-# echo ">>> Step 4: Piper single-arm coupling"
-# $PYTHON scripts/run_piper_coupling.py --config all $DRY_RUN
-
 echo ""
 echo "=========================================="
-echo " All experiments complete!"
+echo " OpenArm experiments complete!"
 echo " Results saved to: $ROOT/results/"
+echo ""
+echo " To run Piper experiments separately:"
+echo "   ./scripts/run_piper_all.sh"
 echo "=========================================="

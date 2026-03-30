@@ -19,6 +19,16 @@ OPENARM_JOINT_LIMITS_DEG = {
     "joint_7": (-80.0, 80.0),
 }
 
+# Piper joint limits (degrees) — conservative defaults
+PIPER_JOINT_LIMITS_DEG = {
+    "joint_1": (-170.0, 170.0),
+    "joint_2": (-90.0, 90.0),
+    "joint_3": (-140.0, 10.0),
+    "joint_4": (-170.0, 170.0),
+    "joint_5": (-90.0, 90.0),
+    "joint_6": (-170.0, 170.0),
+}
+
 # Safety thresholds
 MAX_POSITION_ERROR_DEG = 10.0   # emergency stop if exceeded
 MAX_VELOCITY_DEG_S = 60.0       # emergency stop if exceeded

@@ -131,10 +131,83 @@ def plot_cross_arm():
     print(f"Saved: cross_arm_lemma3.pdf")
 
 
+def plot_piper_coupling_scatter():
+    """Scatter plot for Piper position coupling: |J_ij| vs C_emp."""
+    analysis_file = RESULTS / "piper_coupling_analysis.json"
+    if not analysis_file.exists():
+        print("No piper_coupling_analysis.json. Run analyze_piper.py first.")
+        return
+
+    with open(analysis_file) as f:
+        data = json.load(f)
+
+    fig, ax = plt.subplots(figsize=(5, 4))
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(data), 1)))
+
+    for idx, config in enumerate(data):
+        C_emp = np.array(config["C_emp"])
+        J_pred = np.array(config["J_pred"])
+        n = C_emp.shape[0]
+        i_idx, j_idx = np.triu_indices(n, k=1)
+
+        c_vals = C_emp[i_idx, j_idx]
+        j_vals = np.abs(J_pred[i_idx, j_idx])
+
+        ax.scatter(j_vals, c_vals, s=30, alpha=0.6, color=colors[idx],
+                   label=f"{config['config_name']} (r={config.get('pearson_r', 0):.2f})")
+
+    ax.set_xlabel(r"Predicted $|J_{ij}|$")
+    ax.set_ylabel(r"Measured $C_{\mathrm{emp}}(i,j)$ (position)")
+    ax.set_title("Piper 6-DOF: Position Coupling vs Prediction")
+    ax.legend(fontsize=7)
+    ax.plot([0, 1], [0, 1], "k--", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(FIGURES / "piper_coupling_scatter.pdf", bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {FIGURES / 'piper_coupling_scatter.pdf'}")
+
+
+def plot_piper_heatmaps():
+    """Side-by-side heatmaps for Piper: predicted J vs measured C_emp."""
+    analysis_file = RESULTS / "piper_coupling_analysis.json"
+    if not analysis_file.exists():
+        return
+
+    with open(analysis_file) as f:
+        data = json.load(f)
+
+    for config in data:
+        name = config["config_name"]
+        C_emp = np.array(config["C_emp"])
+        J_pred = np.abs(np.array(config["J_pred"]))
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 3.5))
+
+        im1 = ax1.imshow(J_pred, cmap="Blues", vmin=0, vmax=1)
+        ax1.set_title(f"Predicted |J| ({name})")
+        ax1.set_xlabel("Joint j")
+        ax1.set_ylabel("Joint i")
+        fig.colorbar(im1, ax=ax1, shrink=0.8)
+
+        im2 = ax2.imshow(C_emp, cmap="Oranges", vmin=0)
+        ax2.set_title(f"Measured C_emp ({name})")
+        ax2.set_xlabel("Joint j")
+        fig.colorbar(im2, ax=ax2, shrink=0.8)
+
+        fig.tight_layout()
+        fig.savefig(FIGURES / f"piper_heatmap_{name}.pdf", bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: piper_heatmap_{name}.pdf")
+
+
 def main():
+    # OpenArm plots
     plot_coupling_scatter()
     plot_coupling_heatmaps()
     plot_cross_arm()
+    # Piper plots
+    plot_piper_coupling_scatter()
+    plot_piper_heatmaps()
     print("\nAll plots generated.")
 
 
