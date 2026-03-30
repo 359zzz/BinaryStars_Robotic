@@ -32,12 +32,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 # Experiment configurations (name, q_rad for 7 joints)
+# Joint limits (deg): j1[-75,75] j2[-9,90] j3[-85,85] j4[0,135] j5[-85,85] j6[-40,40] j7[-80,80]
 CONFIGS = {
     "home":            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "elbow_down":      [0.0, 0.0, 0.0, -1.2, 0.0, 0.0, 0.0],
-    "shoulder_elbow":  [0.0, 1.2, 0.0, -0.6, 0.0, 0.0, 0.0],
-    "full_reach":      [0.0, 0.8, 0.0, -1.0, 0.0, 0.8, 0.0],
-    "wrist_twist":     [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    "elbow_up":        [0.0, 0.0, 0.0, +1.2, 0.0, 0.0, 0.0],         # q4=+68.8°
+    "shoulder_elbow":  [0.0, +1.0, 0.0, +0.6, 0.0, 0.0, 0.0],        # q2=+57.3°, q4=+34.4°
+    "full_pose":       [0.0, +0.8, 0.0, +1.0, 0.0, +0.5, 0.0],       # q2=+45.8°, q4=+57.3°, q6=+28.6°
+    "wrist_twist":     [0.0, 0.0, 0.0, 0.0, 0.0, +0.6, 0.0],         # q6=+34.4°
 }
 
 JOINT_NAMES = [f"joint_{i}" for i in range(1, 8)]
