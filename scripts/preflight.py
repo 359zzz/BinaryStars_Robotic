@@ -85,29 +85,33 @@ def preflight_piper(port: str, speed_ratio: int = 35):
         print(f"  {jn}: pos={pos:+7.2f} deg")
     print(f"  gripper: pos={obs.get('gripper.pos', float('nan')):.2f} deg")
 
-    print("[3/4] Micro-motion test (joint_1 +1 deg, then back)...")
+    print("[3/4] Micro-motion test (joint_1 +3 deg, then back)...")
     base_pos = obs["joint_1.pos"]
     target = {f"{jn}.pos": obs[f"{jn}.pos"] for jn in joint_names}
     target["gripper.pos"] = obs.get("gripper.pos", 0.0)
 
-    target["joint_1.pos"] = base_pos + 1.0
-    robot.send_action(target)
-    time.sleep(0.5)
+    # Piper requires continuous commands — send at 100 Hz for 1.5s
+    target["joint_1.pos"] = base_pos + 3.0
+    for _ in range(150):
+        robot.send_action(target)
+        time.sleep(0.01)
 
     obs2 = robot.get_observation()
     delta = obs2["joint_1.pos"] - base_pos
-    print(f"  Commanded +1.0 deg, measured delta = {delta:+.2f} deg")
+    print(f"  Commanded +3.0 deg, measured delta = {delta:+.2f} deg")
 
+    # Move back
     target["joint_1.pos"] = base_pos
-    robot.send_action(target)
-    time.sleep(0.5)
+    for _ in range(150):
+        robot.send_action(target)
+        time.sleep(0.01)
 
-    if abs(delta) < 0.3:
+    if abs(delta) < 0.5:
         print("  WARNING: small response. Check motor enable / connection.")
-    elif abs(delta - 1.0) < 0.5:
+    elif abs(delta - 3.0) < 1.5:
         print("  OK: motor responding correctly")
     else:
-        print(f"  WARNING: unexpected delta {delta:.2f}")
+        print(f"  WARNING: unexpected delta {delta:.2f} deg")
 
     print("[4/4] Disconnecting...")
     robot.disconnect()
