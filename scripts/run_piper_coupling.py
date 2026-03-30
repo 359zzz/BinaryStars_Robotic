@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Experiment 4: Piper 6-DOF single-arm coupling verification.
 
-Piper via lerobot only returns joint positions (no torque, no velocity).
-We use POSITION COUPLING as proxy: perturb one joint with sinusoidal
-commands, measure position oscillation at other joints.  Due to dynamic
-coupling M_ij, the low-level controller cannot perfectly reject the
-disturbance → the non-perturbed joints show measurable position deviation
-at the perturbation frequency, proportional to coupling strength.
+Records POSITION + VELOCITY at all joints while perturbing one joint
+with sinusoidal position commands.
+
+Position coupling is weak because the PID controller compensates coupling
+torques.  However, VELOCITY coupling is more sensitive: the controller
+must generate compensating velocities to reject the disturbance, and
+these are readable via GetArmHighSpdInfoMsgs().
 """
 
 import argparse
@@ -43,14 +44,28 @@ CONFIGS = {
 }
 
 
-def run_position_coupling_trial(robot, joint_names, base_positions_deg,
-                                 perturb_joint, config):
-    """Perturbation trial recording positions (Piper has no torque)."""
+def read_velocities_deg(robot):
+    """Read motor velocities via SDK high-speed info (deg/s)."""
+    try:
+        hs = robot.arm.GetArmHighSpdInfoMsgs()
+        rad_per_s = [
+            float(getattr(getattr(hs, f"motor_{i}"), "motor_speed", 0)) * 1e-3
+            for i in range(1, 7)
+        ]
+        return [v * 180.0 / math.pi for v in rad_per_s]
+    except Exception:
+        return [0.0] * 6
+
+
+def run_coupling_trial(robot, joint_names, base_positions_deg,
+                       perturb_joint, config):
+    """Perturbation trial recording positions + velocities."""
     omega = 2.0 * math.pi * config.frequency_hz
     base_val = base_positions_deg[perturb_joint]
 
     timestamps = []
     positions = []
+    velocities = []
     commanded = []
 
     logger.info(
@@ -80,9 +95,11 @@ def run_position_coupling_trial(robot, joint_names, base_positions_deg,
 
             robot.send_action(cmd)
             obs = robot.get_observation()
+            vel = read_velocities_deg(robot)
 
             timestamps.append(t)
             positions.append([obs.get(f"{jn}.pos", 0.0) for jn in joint_names])
+            velocities.append(vel)
             commanded.append([cmd[f"{jn}.pos"] for jn in joint_names])
 
             sleep_time = config.dt - (time.monotonic() - t0 - t)
@@ -101,6 +118,7 @@ def run_position_coupling_trial(robot, joint_names, base_positions_deg,
     return {
         "timestamps_s": timestamps,
         "positions_deg": positions,
+        "velocities_deg_s": velocities,
         "commanded_deg": commanded,
         "n_samples": len(timestamps),
     }
@@ -141,7 +159,7 @@ def run_config(robot, config_name, q_rad, args):
         jn = f"joint_{j_idx + 1}"
         logger.info(f"  Perturbing {jn} (idx={j_idx})...")
 
-        trial = run_position_coupling_trial(
+        trial = run_coupling_trial(
             robot, JOINT_NAMES, base_positions, jn, pconfig,
         )
 
@@ -167,7 +185,7 @@ def run_config(robot, config_name, q_rad, args):
                 "ramp_s": pconfig.ramp_s,
             },
             "joint_names": JOINT_NAMES,
-            "data_type": "position_only",
+            "data_type": "position_velocity",
             **trial,
             "theoretical": theory,
         }

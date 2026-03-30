@@ -44,6 +44,8 @@ def load_trial(fpath):
     d["positions_deg"] = np.array(d["positions_deg"])
     d["commanded_deg"] = np.array(d["commanded_deg"])
     d["timestamps_s"] = np.array(d["timestamps_s"])
+    if "velocities_deg_s" in d and d["velocities_deg_s"]:
+        d["velocities_deg_s"] = np.array(d["velocities_deg_s"])
     d["_path"] = fpath
     return d
 
@@ -60,12 +62,16 @@ def diagnose_trial(d):
     ramp = d["perturbation"]["ramp_s"]
     n_joints = pos.shape[1]
 
+    has_vel = "velocities_deg_s" in d
+    vel = d.get("velocities_deg_s")  # may be None or np array
+
     diag = {
         "file": Path(d["_path"]).name,
         "config": d["config_name"],
         "perturbed": j_idx,
         "n_samples": len(ts),
         "duration_s": float(ts[-1] - ts[0]),
+        "has_velocity": has_vel,
         "joints": [],
     }
 
@@ -73,22 +79,24 @@ def diagnose_trial(d):
         p = pos[:, j]
         c = cmd[:, j]
         dev = p - c
-        # Use post-ramp data for stats
         mask = ts >= ramp
-        p_ss = p[mask]
         dev_ss = dev[mask]
 
         jinfo = {
             "joint": j,
             "is_perturbed": j == j_idx,
-            "pos_mean": float(np.mean(p)),
             "pos_std": float(np.std(p)),
             "pos_range": float(np.ptp(p)),
-            "dev_std": float(np.std(dev_ss)) if len(dev_ss) > 0 else 0.0,
             "dev_max": float(np.max(np.abs(dev_ss))) if len(dev_ss) > 0 else 0.0,
             "fft_amp_pos": fft_amplitude(p, ts, freq, ramp),
-            "fft_amp_dev": fft_amplitude(dev, ts, freq, ramp),
         }
+
+        if has_vel and vel is not None:
+            v = vel[:, j]
+            jinfo["vel_std"] = float(np.std(v))
+            jinfo["vel_range"] = float(np.ptp(v))
+            jinfo["fft_amp_vel"] = fft_amplitude(v, ts, freq, ramp)
+
         diag["joints"].append(jinfo)
 
     return diag
@@ -97,9 +105,15 @@ def diagnose_trial(d):
 # ── per-config coupling analysis ───────────────────────────────────────
 
 def analyze_config_coupling(trials):
-    """Build C_emp and compare with J_pred for one config."""
+    """Build C_emp and compare with J_pred for one config.
+
+    Uses velocity data if available, falls back to position.
+    """
     n_joints = 6
-    amps = {}
+    amps_pos = {}
+    amps_vel = {}
+    has_vel = any("velocities_deg_s" in d and d["velocities_deg_s"] is not None
+                  for d in trials)
 
     for d in trials:
         j_idx = d["perturbed_joint_idx"]
@@ -108,11 +122,23 @@ def analyze_config_coupling(trials):
         freq = d["perturbation"]["frequency_hz"]
         ramp = d["perturbation"]["ramp_s"]
 
-        a = np.array([
+        a_pos = np.array([
             fft_amplitude(pos[:, j], ts, freq, ramp)
             for j in range(n_joints)
         ])
-        amps[j_idx] = a
+        amps_pos[j_idx] = a_pos
+
+        if has_vel and "velocities_deg_s" in d and d["velocities_deg_s"] is not None:
+            vel = d["velocities_deg_s"]
+            a_vel = np.array([
+                fft_amplitude(vel[:, j], ts, freq, ramp)
+                for j in range(n_joints)
+            ])
+            amps_vel[j_idx] = a_vel
+
+    # Use velocity if available (more sensitive), else position
+    amps = amps_vel if amps_vel else amps_pos
+    data_source = "velocity" if amps_vel else "position"
 
     # Build C_emp
     C = np.zeros((n_joints, n_joints))
@@ -131,7 +157,7 @@ def analyze_config_coupling(trials):
     d_kin = np.abs(ii - jj).astype(float)
     inv_d = 1.0 / d_kin
 
-    stats = {"n_pairs": len(c_vals)}
+    stats = {"n_pairs": len(c_vals), "data_source": data_source}
     if np.std(c_vals) > 1e-10 and np.std(j_vals) > 1e-10:
         rp, pp = pearsonr(j_vals, c_vals)
         rs, ps = spearmanr(j_vals, c_vals)
@@ -190,30 +216,44 @@ def main():
     print("PER-TRIAL DIAGNOSTIC")
     print("=" * 80)
 
+    any_has_vel = any(d.get("has_velocity", False) for d in all_diags)
+
     for config_name in sorted(by_config.keys()):
         trials = by_config[config_name]
         print(f"\n┌── Config: {config_name} ({len(trials)} trials) ──┐")
-        print(f"│  {'file':<32s} │ perturb │ self_amp │ max_other │ other_std │ signal? │")
-        print(f"│{'─' * 32}─┼─────────┼──────────┼───────────┼───────────┼─────────│")
+        if any_has_vel:
+            print(f"│  {'file':<32s} │ j │ self_pos │ oth_pos │ self_vel │ oth_vel │ sig? │")
+            print(f"│{'─' * 32}─┼───┼─────────┼─────────┼──────────┼─────────┼──────│")
+        else:
+            print(f"│  {'file':<32s} │ j │ self_pos │ oth_pos │ other_std │ sig? │")
+            print(f"│{'─' * 32}─┼───┼─────────┼─────────┼───────────┼──────│")
 
         for diag in sorted(all_diags, key=lambda x: x["file"]):
             if diag["config"] != config_name:
                 continue
             j_p = diag["perturbed"]
             self_amp = diag["joints"][j_p]["fft_amp_pos"]
-            others = [diag["joints"][j]["fft_amp_pos"]
-                      for j in range(6) if j != j_p]
-            max_other = max(others)
-            others_std = [diag["joints"][j]["pos_std"]
+            others_pos = [diag["joints"][j]["fft_amp_pos"]
                           for j in range(6) if j != j_p]
-            max_std = max(others_std)
+            max_other_pos = max(others_pos)
 
-            # Signal = max_other > 0.01 deg AND > 1% of self
-            has_signal = max_other > 0.01 and (max_other / max(self_amp, 1e-10)) > 0.01
-            flag = "YES" if has_signal else "no"
+            pos_signal = max_other_pos > 0.01 and (max_other_pos / max(self_amp, 1e-10)) > 0.01
 
-            print(f"│  {diag['file']:<32s} │   j{j_p}    │ "
-                  f"{self_amp:7.4f}° │  {max_other:7.4f}° │  {max_std:7.4f}° │  {flag:>5s}  │")
+            if any_has_vel and diag.get("has_velocity"):
+                self_vel = diag["joints"][j_p].get("fft_amp_vel", 0)
+                others_vel = [diag["joints"][j].get("fft_amp_vel", 0)
+                              for j in range(6) if j != j_p]
+                max_other_vel = max(others_vel)
+                vel_signal = max_other_vel > 0.5 and (max_other_vel / max(self_vel, 1e-10)) > 0.01
+                flag = "VEL" if vel_signal else ("POS" if pos_signal else "no")
+                print(f"│  {diag['file']:<32s} │ {j_p} │ {self_amp:7.3f}° │ {max_other_pos:6.4f}° │"
+                      f" {self_vel:7.2f}  │ {max_other_vel:6.2f}  │ {flag:>4s} │")
+            else:
+                others_std = [diag["joints"][j]["pos_std"]
+                              for j in range(6) if j != j_p]
+                flag = "YES" if pos_signal else "no"
+                print(f"│  {diag['file']:<32s} │ {j_p} │ {self_amp:7.3f}° │ {max_other_pos:6.4f}° │"
+                      f"  {max(others_std):8.5f}° │ {flag:>4s} │")
         print(f"└{'─' * 78}┘")
 
     # ── Position variation summary ─────────────────────────────────────
@@ -225,6 +265,7 @@ def main():
     all_other_stds = []
     all_other_maxdev = []
     all_other_fft = []
+    all_other_vel_fft = []
 
     for diag in all_diags:
         j_p = diag["perturbed"]
@@ -233,32 +274,49 @@ def main():
                 all_other_stds.append(jinfo["pos_std"])
                 all_other_maxdev.append(jinfo["dev_max"])
                 all_other_fft.append(jinfo["fft_amp_pos"])
+                if "fft_amp_vel" in jinfo:
+                    all_other_vel_fft.append(jinfo["fft_amp_vel"])
 
     all_other_stds = np.array(all_other_stds)
     all_other_maxdev = np.array(all_other_maxdev)
     all_other_fft = np.array(all_other_fft)
+    all_other_vel_fft = np.array(all_other_vel_fft) if all_other_vel_fft else np.array([])
 
     print(f"  Total non-perturbed joint readings: {len(all_other_stds)}")
+    print(f"\n  --- Position ---")
     print(f"  Position std:    mean={np.mean(all_other_stds):.6f}°, "
-          f"max={np.max(all_other_stds):.6f}°, "
-          f"median={np.median(all_other_stds):.6f}°")
+          f"max={np.max(all_other_stds):.6f}°")
     print(f"  Max |deviation|: mean={np.mean(all_other_maxdev):.6f}°, "
           f"max={np.max(all_other_maxdev):.6f}°")
     print(f"  FFT at 0.5Hz:    mean={np.mean(all_other_fft):.6f}°, "
           f"max={np.max(all_other_fft):.6f}°")
 
     n_with_signal = np.sum(all_other_fft > 0.01)
-    print(f"\n  Joints with FFT > 0.01°: {n_with_signal}/{len(all_other_fft)}")
-    n_with_std = np.sum(all_other_stds > 0.05)
-    print(f"  Joints with std > 0.05°: {n_with_std}/{len(all_other_stds)}")
+    print(f"  Joints with pos FFT > 0.01°: {n_with_signal}/{len(all_other_fft)}")
 
-    if np.max(all_other_fft) < 0.01:
-        print("\n  *** VERDICT: No coupling signal detected in position data. ***")
-        print("  *** Piper's position controller is too stiff for position-based coupling. ***")
-    elif n_with_signal < 5:
-        print("\n  *** VERDICT: Marginal signal — only a few joints show any response. ***")
+    if len(all_other_vel_fft) > 0:
+        print(f"\n  --- Velocity ---")
+        print(f"  Vel FFT at 0.5Hz: mean={np.mean(all_other_vel_fft):.4f} deg/s, "
+              f"max={np.max(all_other_vel_fft):.4f} deg/s")
+        print(f"  Vel std:           mean={np.mean(all_other_vel_fft):.4f}, "
+              f"median={np.median(all_other_vel_fft):.4f} deg/s")
+        n_vel_signal = np.sum(all_other_vel_fft > 0.5)
+        print(f"  Joints with vel FFT > 0.5 deg/s: {n_vel_signal}/{len(all_other_vel_fft)}")
+
+        if n_vel_signal > 5:
+            print("\n  *** VERDICT: VELOCITY coupling signal detected! ***")
+        elif n_vel_signal > 0:
+            print("\n  *** VERDICT: Marginal velocity signal — some joints respond. ***")
+        else:
+            print("\n  *** VERDICT: No velocity coupling signal either. ***")
     else:
-        print("\n  *** VERDICT: Coupling signal detected! Proceeding with analysis. ***")
+        if np.max(all_other_fft) < 0.01:
+            print("\n  *** VERDICT: No position coupling signal. ***")
+            print("  *** Re-run with velocity-enabled script for better detection. ***")
+        elif n_with_signal < 5:
+            print("\n  *** VERDICT: Marginal position signal. ***")
+        else:
+            print("\n  *** VERDICT: Position coupling signal detected! ***")
 
     # ── Per-config coupling analysis ───────────────────────────────────
     print("\n" + "=" * 80)
@@ -270,7 +328,7 @@ def main():
         trials = by_config[config_name]
         C_emp, J_pred, stats = analyze_config_coupling(trials)
 
-        print(f"\n── {config_name} ──")
+        print(f"\n── {config_name} ({stats.get('data_source', 'position')}) ──")
         print(f"  r(|J|, C_emp)    = {stats['r_coupling']:.4f}")
         print(f"  r(1/d_kin, C_emp)= {stats.get('r_kinematic', 0):.4f}")
         if "rho_coupling" in stats:
