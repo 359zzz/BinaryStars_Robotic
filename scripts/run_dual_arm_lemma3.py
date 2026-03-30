@@ -117,8 +117,9 @@ def main():
     parser.add_argument("--amplitude", type=float, default=3.0)
     parser.add_argument("--frequency", type=float, default=0.5)
     parser.add_argument("--duration", type=float, default=10.0)
-    parser.add_argument("--joints", nargs="+", type=int, default=[0, 3],
-                        help="Which joints to perturb (indices 0-6)")
+    parser.add_argument("--joints", nargs="+", type=int, default=[0, 2],
+                        help="Which joints to perturb (indices 0-6). "
+                             "Avoid idx=3 (joint_4) at home: lower limit is 0 deg.")
     parser.add_argument("--output-dir", default="results")
     args = parser.parse_args()
 
