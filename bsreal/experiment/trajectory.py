@@ -59,7 +59,7 @@ _TRAJECTORY_WAYPOINTS = [
 ]
 
 # Joints whose sign flips for left arm (odd-indexed in kinematic chain)
-_MIRROR_JOINTS = {"joint_1", "joint_3", "joint_5", "joint_7"}
+_MIRROR_JOINTS = {"joint_1", "joint_2", "joint_3", "joint_5", "joint_7"}
 
 
 def _minimum_jerk(t: float) -> float:

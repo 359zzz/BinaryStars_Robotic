@@ -218,12 +218,13 @@ def run_coordination_trial(
             result.q_actual_deg.append(q_cur_deg.tolist())
             result.torques_ff.append(tau_ff.tolist())
 
-            # Safety check
+            # Safety check — relaxed threshold during initial settling
             try:
                 from bsreal.experiment.safety import check_position_error
                 cur_dict = {jn: q_cur_deg[j] for j, jn in enumerate(all_joint_names)}
                 tgt_dict = {jn: q_tgt_deg[j] for j, jn in enumerate(all_joint_names)}
-                check_position_error(cur_dict, tgt_dict, max_error=15.0)
+                max_err = 30.0 if t < 2.0 else 15.0
+                check_position_error(cur_dict, tgt_dict, max_error=max_err)
                 n_errors = 0
             except SafetyError as e:
                 n_errors += 1
