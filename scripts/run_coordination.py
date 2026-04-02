@@ -198,7 +198,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate trajectories without hardware")
     parser.add_argument("--all", action="store_true",
-                        help="Run full suite (3 tasks x 4 controllers x 3 configs)")
+                        help="Run full suite (3 tasks x 4 controllers x 3 configs = 108 trials)")
     args = parser.parse_args()
 
     if args.all or (args.task is None and args.controller is None):

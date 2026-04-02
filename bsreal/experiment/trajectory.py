@@ -1,12 +1,17 @@
 """Bimanual trajectory definitions for coordination experiments.
 
-Experiment design: both arms hold a rigid aluminum bar between grippers.
-Trajectory is sagittal-plane only (joint_2/joint_4) to maintain grasp.
-3 arm configs create different coupling landscapes → different M(q) → different J_ij.
+Bar-holding protocol: both arms extend forward with wrists up, grippers
+hold a rigid aluminum bar.  Trajectory varies j1/j4/j6 (safe axes for
+bar holding).  j2/j3/j5/j7 stay fixed to avoid dropping the bar.
 
-Joint limits (LeRobot OpenArm):
-  Right: joint_2 (-9, 90), joint_4 (0, 135)
-  Left:  joint_2 (-90, 9), joint_4 (0, 135)  [joint_2 is mirrored]
+Joint roles (OpenArm v10):
+  joint_1: shoulder yaw (rotate arm inward/outward)
+  joint_2: shoulder abduction (sideways lift) — keep near 0 for bar!
+  joint_3: shoulder roll
+  joint_4: elbow bend
+  joint_5: wrist pitch (75 deg = wrist standing up)
+  joint_6: wrist rotation
+  joint_7: wrist roll
 """
 
 from __future__ import annotations
@@ -14,8 +19,6 @@ from __future__ import annotations
 import numpy as np
 
 # ── Task object definitions ──────────────────────────────────────────────────
-# "independent" = no bar.  Others = aluminum bar with different total mass.
-# User should weigh actual bar+weight and adjust mass here if needed.
 
 TASK_OBJECTS = {
     "independent":  {"mass": 0.0,  "geometry": "none",     "dims": ()},
@@ -24,40 +27,38 @@ TASK_OBJECTS = {
 }
 
 # ── Arm configurations (degrees) ────────────────────────────────────────────
-# Each config = single arm angles.  Dual-arm: right as-is, left mirrors.
-# All configs: arms forward, suitable for holding horizontal bar.
-# Wrist joints (5,6,7) default to 0 — adjust on-site if gripper orientation
-# needs tuning for your bar setup.
+# Single arm (right) angles.  Left arm mirrors joints 1,2,3,5,6,7.
+# Base pose from hardware testing: arms forward, wrists up, grippers inward.
 
 COORDINATION_CONFIGS = {
-    "bar_low": {
-        "joint_1": 0.0, "joint_2": 50.0, "joint_3": 0.0, "joint_4": 100.0,
-        "joint_5": 0.0, "joint_6": 0.0, "joint_7": 0.0,
+    "bar_a": {
+        "joint_1": 30.0, "joint_2": 0.0, "joint_3": 0.0, "joint_4": 20.0,
+        "joint_5": 75.0, "joint_6": 25.0, "joint_7": 0.0,
     },
-    "bar_mid": {
-        "joint_1": 0.0, "joint_2": 70.0, "joint_3": 0.0, "joint_4": 80.0,
-        "joint_5": 0.0, "joint_6": 0.0, "joint_7": 0.0,
+    "bar_b": {
+        "joint_1": 30.0, "joint_2": 0.0, "joint_3": 0.0, "joint_4": 40.0,
+        "joint_5": 75.0, "joint_6": 25.0, "joint_7": 0.0,
     },
-    "bar_high": {
-        "joint_1": 0.0, "joint_2": 75.0, "joint_3": 0.0, "joint_4": 55.0,
-        "joint_5": 0.0, "joint_6": 0.0, "joint_7": 0.0,
+    "bar_c": {
+        "joint_1": 20.0, "joint_2": 0.0, "joint_3": 0.0, "joint_4": 30.0,
+        "joint_5": 75.0, "joint_6": 25.0, "joint_7": 0.0,
     },
 }
 
 # ── Trajectory waypoints ────────────────────────────────────────────────────
-# Sagittal plane only: joint_2 (shoulder pitch) + joint_4 (elbow).
-# One full forward-backward oscillation.  No lateral/wrist motion → bar safe.
+# Only vary safe axes: joint_1 (shoulder yaw), joint_4 (elbow), joint_6 (wrist rot).
+# These can change without dropping the bar (confirmed by user testing).
 
 _BAR_WAYPOINTS = [
-    (0.00, {}),                                          # start
-    (0.25, {"joint_2": 10.0, "joint_4": -8.0}),         # forward reach
-    (0.50, {}),                                          # center
-    (0.75, {"joint_2": -10.0, "joint_4": 8.0}),         # pull back
-    (1.00, {}),                                          # return
+    (0.00, {}),                                                        # start
+    (0.25, {"joint_1": -8.0, "joint_4": 15.0, "joint_6": -8.0}),      # inward + bend
+    (0.50, {}),                                                        # center
+    (0.75, {"joint_1": 8.0, "joint_4": -10.0, "joint_6": 8.0}),       # outward + extend
+    (1.00, {}),                                                        # return
 ]
 
-# Joints whose sign flips for left arm (SDK mirrored limits)
-_MIRROR_JOINTS = {"joint_1", "joint_2", "joint_3", "joint_5", "joint_7"}
+# Joints whose sign flips for left arm
+_MIRROR_JOINTS = {"joint_1", "joint_2", "joint_3", "joint_5", "joint_6", "joint_7"}
 
 
 def _minimum_jerk(t: float) -> float:
@@ -113,11 +114,9 @@ def generate_bimanual_trajectory(
     q_right = np.zeros((n_steps, 7))
     q_left = np.zeros((n_steps, 7))
 
-    waypoints = _BAR_WAYPOINTS
-
     for step, t in enumerate(timestamps):
         t_frac = t / duration_s
-        delta = _interpolate_waypoints(waypoints, t_frac)
+        delta = _interpolate_waypoints(_BAR_WAYPOINTS, t_frac)
 
         for j, jn in enumerate(joint_names):
             base_val = base[jn]

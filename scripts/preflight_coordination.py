@@ -124,8 +124,8 @@ def preflight_openarm_dual(left_port: str, right_port: str):
         print(f"  WARNING: sync error = {sync_error:.2f} deg")
 
     # Step 6: Trajectory preview
-    print("[6/6] Trajectory preview (bar_mid config)...")
-    start_pos = get_start_positions_deg("bar_mid")
+    print("[6/6] Trajectory preview (bar_a config)...")
+    start_pos = get_start_positions_deg("bar_a")
     print(f"  Start positions: { {k: f'{v:.1f}' for k, v in list(start_pos.items())[:4]} } ...")
     print("  OK: trajectory module loaded")
 

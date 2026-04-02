@@ -160,14 +160,20 @@ def run_coordination_trial(
     slow_move(robot, start_cmd, duration_s=3.0)
     time.sleep(1.0)
 
-    # 2. Object placement (manual)
+    # 2. Object placement
     has_object = coord_config.object_mass_kg > 0
     if has_object:
+        # Open grippers for bar placement
+        robot.send_action({"right_gripper.pos": -50.0, "left_gripper.pos": -50.0})
+        time.sleep(0.5)
         input(
-            f"\n>>> Arms in position. Place the bar ({coord_config.object_mass_kg} kg) "
-            f"into both grippers, then press ENTER to start trial..."
+            f"\n>>> Grippers open. Place the bar ({coord_config.object_mass_kg} kg) "
+            f"between both grippers, then press ENTER..."
         )
-        time.sleep(1.0)
+        # Close grippers to hold bar
+        robot.send_action({"right_gripper.pos": 0.0, "left_gripper.pos": 0.0})
+        print("  Grippers closing...")
+        time.sleep(2.0)
 
     # 3. Control loop
     logger.info(
@@ -248,11 +254,12 @@ def run_coordination_trial(
     except KeyboardInterrupt:
         logger.info("Trial interrupted")
     finally:
-        # Return to base
+        # Hold position, open grippers if object
         robot.send_action(start_cmd)
         if has_object:
             time.sleep(0.5)
-            robot.send_action({"right_gripper.pos": 90.0, "left_gripper.pos": 90.0})
+            robot.send_action({"right_gripper.pos": -50.0, "left_gripper.pos": -50.0})
+            input("\n>>> Trial done. Remove the bar, then press ENTER...")
 
     # 4. Compute RMSE
     if len(result.q_target_deg) > 10:
