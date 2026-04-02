@@ -162,16 +162,21 @@ def run_coordination_trial(
 
     # 2. Object placement
     has_object = coord_config.object_mass_kg > 0
+    # Gripper values differ by robot
+    if controller.robot_type == "piper":
+        gripper_open = 80.0    # Piper: 0=closed, ~100=open
+        gripper_close = 0.0
+    else:
+        gripper_open = -50.0   # OpenArm: -65=open, 0=closed
+        gripper_close = 0.0
     if has_object:
-        # Open grippers for bar placement
-        robot.send_action({"right_gripper.pos": -50.0, "left_gripper.pos": -50.0})
+        robot.send_action({"right_gripper.pos": gripper_open, "left_gripper.pos": gripper_open})
         time.sleep(0.5)
         input(
             f"\n>>> Grippers open. Place the bar ({coord_config.object_mass_kg} kg) "
             f"between both grippers, then press ENTER..."
         )
-        # Close grippers to hold bar
-        robot.send_action({"right_gripper.pos": 0.0, "left_gripper.pos": 0.0})
+        robot.send_action({"right_gripper.pos": gripper_close, "left_gripper.pos": gripper_close})
         print("  Grippers closing...")
         time.sleep(2.0)
 
@@ -263,7 +268,7 @@ def run_coordination_trial(
         robot.send_action(start_cmd)
         if has_object:
             time.sleep(0.5)
-            robot.send_action({"right_gripper.pos": -50.0, "left_gripper.pos": -50.0})
+            robot.send_action({"right_gripper.pos": gripper_open, "left_gripper.pos": gripper_open})
             input("\n>>> Trial done. Remove the bar, then press ENTER...")
 
     # 4. Compute RMSE
