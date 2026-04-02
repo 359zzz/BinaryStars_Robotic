@@ -154,7 +154,19 @@ def run_single(args):
                 time.sleep(1.0)
     finally:
         if robot and not args.dry_run:
+            _return_to_zero(robot, n_per_arm)
             robot.disconnect()
+
+
+def _return_to_zero(robot, n_per_arm: int):
+    """Slowly return all joints to zero before disconnecting."""
+    logger.info("Returning to zero...")
+    zero = {}
+    for i in range(1, n_per_arm + 1):
+        zero[f"right_joint_{i}.pos"] = 0.0
+        zero[f"left_joint_{i}.pos"] = 0.0
+    robot.send_action(zero)
+    time.sleep(3.0)
 
 
 def run_suite(args):
@@ -183,6 +195,7 @@ def run_suite(args):
         logger.info(f"Suite complete: {summary['n_trials']} trials")
     finally:
         if robot and not args.dry_run:
+            _return_to_zero(robot, n_per_arm)
             robot.disconnect()
 
 
