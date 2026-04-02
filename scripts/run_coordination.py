@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """Run dual-arm coordination experiments (Tables 9-10, Fig 7).
 
+Bar-holding protocol:
+  Both arms extend forward, grippers hold a rigid aluminum bar.
+  Trajectory: sagittal-plane oscillation (forward/backward).
+  3 configs x 3 tasks x 4 controllers x 3 reps = 108 trials.
+
 Usage:
-    # Single trial
-    python scripts/run_coordination.py --robot openarm --task box_lift --controller c_coupled --config home
+    # Single trial (no bar, validation)
+    python scripts/run_coordination.py --robot openarm \
+        --task independent --controller decoupled --config bar_mid \
+        --reps 1 --right-port can1 --left-port can2
+
+    # Single trial (with bar)
+    python scripts/run_coordination.py --robot openarm \
+        --task bar_only --controller c_coupled --config bar_mid \
+        --reps 1 --right-port can1 --left-port can2
 
     # Full suite
-    python scripts/run_coordination.py --robot openarm --all
+    python scripts/run_coordination.py --robot openarm --all \
+        --right-port can1 --left-port can2
 
-    # Dry run (no hardware, validate trajectories + coupling computation)
+    # Dry run
     python scripts/run_coordination.py --robot openarm --dry-run
-
-    # Specific subset
-    python scripts/run_coordination.py --robot openarm --task box_lift barbell_lift --controller c_coupled j_coupled
 """
 
 import argparse
@@ -100,12 +110,8 @@ def run_single(args):
         args.controller[0], ir, n_per_arm, robot_type, M_obj=M_obj,
     )
 
-    if robot_type == "openarm":
-        jn_right = [f"right_joint_{i}" for i in range(1, n_per_arm + 1)]
-        jn_left = [f"left_joint_{i}" for i in range(1, n_per_arm + 1)]
-    else:
-        jn_right = [f"right_joint_{i}" for i in range(1, n_per_arm + 1)]
-        jn_left = [f"left_joint_{i}" for i in range(1, n_per_arm + 1)]
+    jn_right = [f"right_joint_{i}" for i in range(1, n_per_arm + 1)]
+    jn_left = [f"left_joint_{i}" for i in range(1, n_per_arm + 1)]
 
     cc = CoordinationConfig(
         task_name=args.task[0],
@@ -178,8 +184,8 @@ def run_suite(args):
 def main():
     parser = argparse.ArgumentParser(description="Dual-arm coordination experiments")
     parser.add_argument("--robot", choices=["openarm", "piper"], default="openarm")
-    parser.add_argument("--left-port", default="can1")
-    parser.add_argument("--right-port", default="can0")
+    parser.add_argument("--left-port", default="can2")
+    parser.add_argument("--right-port", default="can1")
     parser.add_argument("--task", nargs="+",
                         choices=list(TASK_OBJECTS.keys()))
     parser.add_argument("--controller", nargs="+",
@@ -192,7 +198,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate trajectories without hardware")
     parser.add_argument("--all", action="store_true",
-                        help="Run full suite (4 tasks x 4 controllers x 5 configs)")
+                        help="Run full suite (3 tasks x 4 controllers x 3 configs)")
     args = parser.parse_args()
 
     if args.all or (args.task is None and args.controller is None):

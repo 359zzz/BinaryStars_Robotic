@@ -1,64 +1,62 @@
 """Bimanual trajectory definitions for coordination experiments.
 
-4 tasks share the SAME trajectory (paper: fixed trajectory, vary object only).
-5 arm configurations define different M(q) coupling landscapes.
+Experiment design: both arms hold a rigid aluminum bar between grippers.
+Trajectory is sagittal-plane only (joint_2/joint_4) to maintain grasp.
+3 arm configs create different coupling landscapes → different M(q) → different J_ij.
+
+Joint limits (LeRobot OpenArm):
+  Right: joint_2 (-9, 90), joint_4 (0, 135)
+  Left:  joint_2 (-90, 9), joint_4 (0, 135)  [joint_2 is mirrored]
 """
 
 from __future__ import annotations
 
-import math
 import numpy as np
 
 # ── Task object definitions ──────────────────────────────────────────────────
+# "independent" = no bar.  Others = aluminum bar with different total mass.
+# User should weigh actual bar+weight and adjust mass here if needed.
 
 TASK_OBJECTS = {
     "independent":  {"mass": 0.0,  "geometry": "none",     "dims": ()},
-    "box_lift":     {"mass": 0.2,  "geometry": "box",      "dims": (0.15, 0.10, 0.10)},
-    "barbell_lift": {"mass": 2.0,  "geometry": "cylinder",  "dims": (0.02, 0.40)},
-    "rod_rotation": {"mass": 1.0,  "geometry": "cylinder",  "dims": (0.015, 0.30)},
+    "bar_only":     {"mass": 0.3,  "geometry": "cylinder",  "dims": (0.02, 0.25)},
+    "bar_loaded":   {"mass": 1.5,  "geometry": "cylinder",  "dims": (0.02, 0.25)},
 }
 
 # ── Arm configurations (degrees) ────────────────────────────────────────────
-# Each config is {joint_name: angle_deg} for a SINGLE arm (7-DOF OpenArm).
-# Dual-arm = right uses config as-is, left mirrors sign of joints 1,3,5,7.
+# Each config = single arm angles.  Dual-arm: right as-is, left mirrors.
+# All configs: arms forward, suitable for holding horizontal bar.
+# Wrist joints (5,6,7) default to 0 — adjust on-site if gripper orientation
+# needs tuning for your bar setup.
 
 COORDINATION_CONFIGS = {
-    "home": {
-        "joint_1": 0.0, "joint_2": 45.0, "joint_3": 0.0, "joint_4": 67.5,
+    "bar_low": {
+        "joint_1": 0.0, "joint_2": 50.0, "joint_3": 0.0, "joint_4": 100.0,
         "joint_5": 0.0, "joint_6": 0.0, "joint_7": 0.0,
     },
-    "elbow_up": {
-        "joint_1": 0.0, "joint_2": 30.0, "joint_3": 0.0, "joint_4": 120.0,
+    "bar_mid": {
+        "joint_1": 0.0, "joint_2": 70.0, "joint_3": 0.0, "joint_4": 80.0,
         "joint_5": 0.0, "joint_6": 0.0, "joint_7": 0.0,
     },
-    "shoulder_elbow": {
-        "joint_1": 20.0, "joint_2": 60.0, "joint_3": -30.0, "joint_4": 90.0,
+    "bar_high": {
+        "joint_1": 0.0, "joint_2": 75.0, "joint_3": 0.0, "joint_4": 55.0,
         "joint_5": 0.0, "joint_6": 0.0, "joint_7": 0.0,
-    },
-    "full_reach": {
-        "joint_1": 0.0, "joint_2": 80.0, "joint_3": 0.0, "joint_4": 45.0,
-        "joint_5": 0.0, "joint_6": 20.0, "joint_7": 0.0,
-    },
-    "wrist_engaged": {
-        "joint_1": 0.0, "joint_2": 45.0, "joint_3": 0.0, "joint_4": 90.0,
-        "joint_5": 30.0, "joint_6": -20.0, "joint_7": 40.0,
     },
 }
 
-# ── Trajectory waypoints (degrees, relative to start config) ────────────────
-# Each trajectory is a list of (time_fraction, delta_q_deg) pairs.
-# delta_q_deg is a dict of {joint_name: delta_angle} for the RIGHT arm.
-# Left arm mirrors: joints 1,3,5,7 negate delta.
+# ── Trajectory waypoints ────────────────────────────────────────────────────
+# Sagittal plane only: joint_2 (shoulder pitch) + joint_4 (elbow).
+# One full forward-backward oscillation.  No lateral/wrist motion → bar safe.
 
-_TRAJECTORY_WAYPOINTS = [
-    (0.0,  {}),  # start
-    (0.25, {"joint_2": 10.0, "joint_4": -15.0}),
-    (0.50, {"joint_2": 15.0, "joint_4": -25.0, "joint_5": 10.0}),
-    (0.75, {"joint_2": 10.0, "joint_4": -15.0}),
-    (1.0,  {}),  # return to start
+_BAR_WAYPOINTS = [
+    (0.00, {}),                                          # start
+    (0.25, {"joint_2": 10.0, "joint_4": -8.0}),         # forward reach
+    (0.50, {}),                                          # center
+    (0.75, {"joint_2": -10.0, "joint_4": 8.0}),         # pull back
+    (1.00, {}),                                          # return
 ]
 
-# Joints whose sign flips for left arm (odd-indexed in kinematic chain)
+# Joints whose sign flips for left arm (SDK mirrored limits)
 _MIRROR_JOINTS = {"joint_1", "joint_2", "joint_3", "joint_5", "joint_7"}
 
 
@@ -101,12 +99,6 @@ def generate_bimanual_trajectory(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate bimanual trajectory for OpenArm 14-DOF.
 
-    Parameters
-    ----------
-    config_name : key into COORDINATION_CONFIGS
-    duration_s : total duration in seconds
-    dt : timestep
-
     Returns
     -------
     timestamps : (T,) array
@@ -121,15 +113,16 @@ def generate_bimanual_trajectory(
     q_right = np.zeros((n_steps, 7))
     q_left = np.zeros((n_steps, 7))
 
+    waypoints = _BAR_WAYPOINTS
+
     for step, t in enumerate(timestamps):
         t_frac = t / duration_s
-        delta = _interpolate_waypoints(_TRAJECTORY_WAYPOINTS, t_frac)
+        delta = _interpolate_waypoints(waypoints, t_frac)
 
         for j, jn in enumerate(joint_names):
             base_val = base[jn]
             d = delta.get(jn, 0.0)
             q_right[step, j] = base_val + d
-            # Left arm: mirror odd joints
             if jn in _MIRROR_JOINTS:
                 q_left[step, j] = -(base_val + d)
             else:

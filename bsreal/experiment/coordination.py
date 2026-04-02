@@ -160,21 +160,14 @@ def run_coordination_trial(
     slow_move(robot, start_cmd, duration_s=3.0)
     time.sleep(1.0)
 
-    # 2. Gripper handling for object tasks
+    # 2. Object placement (manual)
     has_object = coord_config.object_mass_kg > 0
     if has_object:
-        # Open grippers wide
-        robot.send_action({"right_gripper.pos": -60.0, "left_gripper.pos": -60.0})
-        time.sleep(0.5)
         input(
-            f"\n>>> Grippers OPEN. Place the {coord_config.task_name.replace('_', ' ')} "
-            f"({coord_config.object_mass_kg} kg) into both grippers, then press ENTER..."
+            f"\n>>> Arms in position. Place the bar ({coord_config.object_mass_kg} kg) "
+            f"into both grippers, then press ENTER to start trial..."
         )
-        # Close grippers
-        robot.send_action({"right_gripper.pos": 0.0, "left_gripper.pos": 0.0})
         time.sleep(1.0)
-        print("  Grippers closed. Starting trial in 2 seconds...")
-        time.sleep(2.0)
 
     # 3. Control loop
     logger.info(
