@@ -96,25 +96,86 @@ def _combine_link6_and_gripper():
     return m_total, c_combined, I_combined
 
 
-def make_piper_single_arm_ir(*, gravity=(0.0, 0.0, -9.81)):
+PIPER_RIGHT_ARM_MOUNT_XYZ = (0.0, -0.15, 0.0)
+PIPER_RIGHT_ARM_MOUNT_YAW = 0.0
+PIPER_LEFT_ARM_MOUNT_XYZ = (0.0, 0.15, 0.0)
+PIPER_LEFT_ARM_MOUNT_YAW = math.pi
+
+
+def _build_arm_data(*, reflect=1, mount_xyz=None, mount_yaw=0.0):
+    """Build axes, masses, inertias, coms, transforms for one Piper arm."""
     n = 6
     axes = np.array(PIPER_JOINT_AXES, dtype=float)
-    transforms = [_make_transform(PIPER_JOINT_XYZ[i], PIPER_JOINT_RPY[i]) for i in range(n)]
     m6_combined, c6_combined, I6_combined = _combine_link6_and_gripper()
     masses = np.array(list(_LINK_MASSES_RAW[:5]) + [m6_combined], dtype=float)
     coms = np.zeros((n, 3), dtype=float)
     for i in range(5):
         coms[i] = _LINK_COMS_RAW[i]
     coms[5] = c6_combined
+    if reflect == -1:
+        coms[:, 1] *= -1
     inertias = np.zeros((n, 3, 3), dtype=float)
     for i in range(5):
         inertias[i] = np.array(_LINK_INERTIAS_RAW[i])
     inertias[5] = I6_combined
+    transforms = []
+    for i in range(n):
+        rpy = PIPER_JOINT_RPY[i]
+        rpy_r = (reflect * rpy[0], reflect * rpy[1], reflect * rpy[2])
+        if i == 0 and mount_xyz is not None:
+            T_mount = _make_transform(mount_xyz, (0.0, 0.0, mount_yaw))
+            T_joint = _make_transform(PIPER_JOINT_XYZ[i], rpy_r)
+            transforms.append(T_mount @ T_joint)
+        else:
+            transforms.append(_make_transform(PIPER_JOINT_XYZ[i], rpy_r))
+    return axes, masses, inertias, coms, transforms
+
+
+def make_piper_single_arm_ir(*, gravity=(0.0, 0.0, -9.81)):
+    axes, masses, inertias, coms, transforms = _build_arm_data(reflect=1)
     return DynamicsIR(
         name="piper_single_arm", topology="serial",
         parent_indices=(-1, 0, 1, 2, 3, 4), tree_depth=6,
-        mass_matrix_bandwidth=6, n_joints=n,
+        mass_matrix_bandwidth=6, n_joints=6,
         joint_names=("joint1","joint2","joint3","joint4","joint5","joint6"),
+        joint_axes_local=axes,
+        parent_to_joint_transforms=tuple(transforms),
+        base_transform=np.eye(4, dtype=float),
+        link_masses=masses, link_inertias=inertias,
+        link_com_local=coms, gravity=np.array(gravity, dtype=float),
+    )
+
+
+def make_piper_dual_arm_ir(*, gravity=(0.0, 0.0, -9.81), arm_separation=0.3):
+    """12-DOF tree topology (6+6) dual-arm Piper.
+
+    parent_indices = (-1, 0, 1, 2, 3, 4, -1, 6, 7, 8, 9, 10)
+    Two independent roots at indices 0 and 6.
+    """
+    mount_r = (0.0, -arm_separation / 2, 0.0)
+    mount_l = (0.0, arm_separation / 2, 0.0)
+    r_axes, r_masses, r_inertias, r_coms, r_transforms = _build_arm_data(
+        reflect=1, mount_xyz=mount_r, mount_yaw=PIPER_RIGHT_ARM_MOUNT_YAW,
+    )
+    l_axes, l_masses, l_inertias, l_coms, l_transforms = _build_arm_data(
+        reflect=-1, mount_xyz=mount_l, mount_yaw=PIPER_LEFT_ARM_MOUNT_YAW,
+    )
+    axes = np.vstack([r_axes, l_axes])
+    masses = np.concatenate([r_masses, l_masses])
+    inertias = np.concatenate([r_inertias, l_inertias], axis=0)
+    coms = np.vstack([r_coms, l_coms])
+    transforms = r_transforms + l_transforms
+    parent_indices = (-1, 0, 1, 2, 3, 4, -1, 6, 7, 8, 9, 10)
+    return DynamicsIR(
+        name="piper_dual_arm", topology="tree",
+        parent_indices=parent_indices, tree_depth=6,
+        mass_matrix_bandwidth=12, n_joints=12,
+        joint_names=(
+            "right_joint1","right_joint2","right_joint3",
+            "right_joint4","right_joint5","right_joint6",
+            "left_joint1","left_joint2","left_joint3",
+            "left_joint4","left_joint5","left_joint6",
+        ),
         joint_axes_local=axes,
         parent_to_joint_transforms=tuple(transforms),
         base_transform=np.eye(4, dtype=float),
