@@ -163,7 +163,12 @@ def run_suite(args):
 
     tasks = args.task if args.task else None
     controllers = args.controller if args.controller else None
-    configs = args.config if args.config else None
+    if args.config:
+        configs = args.config
+    else:
+        # Auto-select configs matching robot type
+        prefix = "piper_" if robot_type == "piper" else "bar_"
+        configs = [k for k in COORDINATION_CONFIGS if k.startswith(prefix)]
 
     if robot and not args.dry_run:
         robot.connect()

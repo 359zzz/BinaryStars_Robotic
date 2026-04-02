@@ -201,7 +201,7 @@ def run_coordination_trial(
             q_cur_deg = np.array([obs.get(f"{jn}.pos", 0.0) for jn in all_joint_names])
             q_cur_rad = np.deg2rad(q_cur_deg)
             qdot_cur = np.array([obs.get(f"{jn}.vel", 0.0) for jn in all_joint_names])
-            qdot_cur_rad = np.deg2rad(qdot_cur)
+            qdot_cur_rad = np.deg2rad(qdot_cur)  # Piper has no vel, defaults to 0
 
             # Compute control action
             qdot_tgt = np.zeros(n_total)  # zero velocity target for now
