@@ -66,28 +66,33 @@ def check_position_error(
                 )
 
 
+def _minimum_jerk(t: float) -> float:
+    """Minimum-jerk profile: smooth acceleration and deceleration."""
+    t = max(0.0, min(1.0, t))
+    return 10 * t**3 - 15 * t**4 + 6 * t**5
+
+
 def slow_move(
     robot,
     target_deg: dict[str, float],
     duration_s: float = 3.0,
-    dt: float = 0.01,
+    dt: float = 0.02,
 ) -> None:
-    """Slowly ramp from current position to target over `duration_s`."""
+    """Smoothly move from current position to target (minimum-jerk profile)."""
     obs = robot.get_observation()
-    start = {k: obs[k] for k in target_deg}
+    start = {k: obs.get(k, 0.0) for k in target_deg}
     n_steps = max(int(duration_s / dt), 1)
 
     for step in range(n_steps + 1):
-        alpha = step / n_steps
+        alpha = _minimum_jerk(step / n_steps)
         cmd = {}
         for k in target_deg:
             cmd[k] = start[k] + alpha * (target_deg[k] - start[k])
         robot.send_action(cmd)
         time.sleep(dt)
 
-    # Hold final position briefly
     robot.send_action(target_deg)
-    time.sleep(0.5)
+    time.sleep(0.3)
 
 
 def emergency_freeze(robot) -> None:

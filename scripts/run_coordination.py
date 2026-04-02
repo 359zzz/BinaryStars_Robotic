@@ -160,13 +160,13 @@ def run_single(args):
 
 def _return_to_zero(robot, n_per_arm: int):
     """Slowly return all joints to zero before disconnecting."""
+    from bsreal.experiment.safety import slow_move
     logger.info("Returning to zero...")
     zero = {}
     for i in range(1, n_per_arm + 1):
         zero[f"right_joint_{i}.pos"] = 0.0
         zero[f"left_joint_{i}.pos"] = 0.0
-    robot.send_action(zero)
-    time.sleep(3.0)
+    slow_move(robot, zero, duration_s=4.0)
 
 
 def run_suite(args):

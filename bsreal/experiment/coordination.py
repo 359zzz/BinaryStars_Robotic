@@ -240,7 +240,7 @@ def run_coordination_trial(
                 if t < 3.0:
                     max_err = 45.0
                 elif controller.robot_type == "piper":
-                    max_err = 30.0  # position control only, lower precision
+                    max_err = 45.0  # position control + j5 calibration offset
                 else:
                     max_err = 15.0
                 check_position_error(cur_dict, tgt_dict, max_error=max_err)
@@ -264,8 +264,8 @@ def run_coordination_trial(
     except KeyboardInterrupt:
         logger.info("Trial interrupted")
     finally:
-        # Hold position, open grippers if object
-        robot.send_action(start_cmd)
+        # Smoothly return to start, open grippers if object
+        slow_move(robot, start_cmd, duration_s=3.0)
         if has_object:
             time.sleep(0.5)
             robot.send_action({"right_gripper.pos": gripper_open, "left_gripper.pos": gripper_open})
