@@ -9,6 +9,7 @@ import json
 import math
 import time
 import logging
+import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,11 @@ from bsreal.experiment.trajectory import (
 from bsreal.experiment.safety import slow_move, emergency_freeze, SafetyError
 
 logger = logging.getLogger(__name__)
+
+GRIPPER_LATCH_KP = {"gripper": 10.0}
+GRIPPER_LATCH_KD = {"gripper": 0.25}
+GRIPPER_HOLD_KP = {"gripper": 8.0}
+GRIPPER_HOLD_KD = {"gripper": 0.2}
 
 
 @dataclass
@@ -98,20 +104,58 @@ def _current_dual_gripper_cmd(robot) -> dict[str, float]:
     }
 
 
+def _send_action(robot, cmd: dict[str, float], *, custom_kp=None, custom_kd=None) -> None:
+    if custom_kp is not None or custom_kd is not None:
+        robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+    else:
+        robot.send_action(cmd)
+
+
 def _send_gripper_repeated(
     robot,
     target: float,
     *,
     duration_s: float = 1.0,
     dt: float = 0.05,
+    custom_kp=None,
+    custom_kd=None,
 ) -> dict[str, float]:
     """Send a dual-gripper command repeatedly so the hold state latches."""
     cmd = _dual_gripper_cmd(target)
     n_steps = max(int(duration_s / dt), 1)
     for _ in range(n_steps):
-        robot.send_action(cmd)
+        _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
         time.sleep(dt)
-    robot.send_action(cmd)
+    _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+    return cmd
+
+
+def _hold_gripper_target_until_enter(
+    robot,
+    target: float,
+    prompt: str,
+    *,
+    dt: float = 0.05,
+    custom_kp=None,
+    custom_kd=None,
+) -> dict[str, float]:
+    """Keep sending the same dual-gripper target while waiting for manual input."""
+    cmd = _dual_gripper_cmd(target)
+    stop_event = threading.Event()
+
+    def _worker():
+        while not stop_event.is_set():
+            _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+            time.sleep(dt)
+        _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+
+    worker = threading.Thread(target=_worker, name="coordination-gripper-hold", daemon=True)
+    worker.start()
+    try:
+        input(prompt)
+    finally:
+        stop_event.set()
+        worker.join(timeout=max(0.2, 4 * dt))
     return cmd
 
 
@@ -232,21 +276,60 @@ def run_coordination_trial(
     start_pos = get_start_positions_deg(coord_config.config_name)
     start_cmd = {f"{jn}.pos": start_pos.get(jn, 0.0) for jn in all_joint_names}
     start_cmd.update(_current_dual_gripper_cmd(robot))
-    slow_move(robot, start_cmd, duration_s=3.0)
+    if controller.robot_type == "openarm":
+        slow_move(
+            robot,
+            start_cmd,
+            duration_s=3.0,
+            custom_kp=GRIPPER_HOLD_KP,
+            custom_kd=GRIPPER_HOLD_KD,
+        )
+    else:
+        slow_move(robot, start_cmd, duration_s=3.0)
     time.sleep(1.0)
 
     # 2. Object placement
     has_object = coord_config.object_mass_kg > 0
     gripper_open, gripper_close = _gripper_targets(robot, controller.robot_type)
     active_gripper_cmd = _current_dual_gripper_cmd(robot)
+    gripper_latch_kp = GRIPPER_LATCH_KP if controller.robot_type == "openarm" else None
+    gripper_latch_kd = GRIPPER_LATCH_KD if controller.robot_type == "openarm" else None
+    gripper_hold_kp = GRIPPER_HOLD_KP if controller.robot_type == "openarm" else None
+    gripper_hold_kd = GRIPPER_HOLD_KD if controller.robot_type == "openarm" else None
     if has_object:
-        _send_gripper_repeated(robot, gripper_open, duration_s=0.75)
-        input(
-            f"\n>>> Grippers open. Place the bar ({coord_config.object_mass_kg} kg) "
-            f"between both grippers, then press ENTER..."
+        _send_gripper_repeated(
+            robot,
+            gripper_open,
+            duration_s=0.5,
+            custom_kp=gripper_latch_kp,
+            custom_kd=gripper_latch_kd,
+        )
+        _hold_gripper_target_until_enter(
+            robot,
+            gripper_open,
+            (
+                f"\n>>> Grippers are being held open. Place the bar "
+                f"({coord_config.object_mass_kg} kg) between both grippers, "
+                f"then press ENTER..."
+            ),
+            custom_kp=gripper_hold_kp,
+            custom_kd=gripper_hold_kd,
         )
         print("  Grippers closing...")
-        active_gripper_cmd = _send_gripper_repeated(robot, gripper_close, duration_s=2.0)
+        _send_gripper_repeated(
+            robot,
+            gripper_close,
+            duration_s=1.25,
+            custom_kp=gripper_latch_kp,
+            custom_kd=gripper_latch_kd,
+        )
+        active_gripper_cmd = _send_gripper_repeated(
+            robot,
+            gripper_close,
+            duration_s=0.6,
+            custom_kp=gripper_hold_kp,
+            custom_kd=gripper_hold_kd,
+        )
 
     # 3. Control loop
     logger.info(
@@ -294,7 +377,12 @@ def run_coordination_trial(
             if has_object:
                 cmd.update(active_gripper_cmd)
 
-            robot.send_action(cmd)
+            _send_action(
+                robot,
+                cmd,
+                custom_kp=gripper_hold_kp if has_object else None,
+                custom_kd=gripper_hold_kd if has_object else None,
+            )
 
             # Record
             result.timestamps.append(t)
@@ -334,13 +422,35 @@ def run_coordination_trial(
     except KeyboardInterrupt:
         logger.info("Trial interrupted")
     finally:
-        # Smoothly return to start, open grippers if object
-        start_cmd.update(active_gripper_cmd)
-        slow_move(robot, start_cmd, duration_s=3.0)
         if has_object:
-            time.sleep(0.5)
-            _send_gripper_repeated(robot, gripper_open, duration_s=0.75)
-            input("\n>>> Trial done. Remove the bar, then press ENTER...")
+            _hold_gripper_target_until_enter(
+                robot,
+                gripper_close,
+                "\n>>> Support or remove the bar, then press ENTER to release the grippers...",
+                custom_kp=gripper_hold_kp,
+                custom_kd=gripper_hold_kd,
+            )
+            active_gripper_cmd = _send_gripper_repeated(
+                robot,
+                gripper_open,
+                duration_s=0.8,
+                custom_kp=gripper_latch_kp,
+                custom_kd=gripper_latch_kd,
+            )
+            time.sleep(0.3)
+
+        # Return only after the grippers have been unloaded/opened.
+        start_cmd.update(active_gripper_cmd)
+        if controller.robot_type == "openarm":
+            slow_move(
+                robot,
+                start_cmd,
+                duration_s=3.0,
+                custom_kp=GRIPPER_HOLD_KP,
+                custom_kd=GRIPPER_HOLD_KD,
+            )
+        else:
+            slow_move(robot, start_cmd, duration_s=3.0)
 
     # 4. Compute RMSE
     if len(result.q_target_deg) > 10:

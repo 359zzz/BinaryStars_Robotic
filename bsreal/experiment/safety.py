@@ -77,6 +77,8 @@ def slow_move(
     target_deg: dict[str, float],
     duration_s: float = 3.0,
     dt: float = 0.02,
+    custom_kp: dict[str, float] | None = None,
+    custom_kd: dict[str, float] | None = None,
 ) -> None:
     """Smoothly move from current position to target (minimum-jerk profile)."""
     obs = robot.get_observation()
@@ -88,10 +90,16 @@ def slow_move(
         cmd = {}
         for k in target_deg:
             cmd[k] = start[k] + alpha * (target_deg[k] - start[k])
-        robot.send_action(cmd)
+        if custom_kp is not None or custom_kd is not None:
+            robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+        else:
+            robot.send_action(cmd)
         time.sleep(dt)
 
-    robot.send_action(target_deg)
+    if custom_kp is not None or custom_kd is not None:
+        robot.send_action(target_deg, custom_kp=custom_kp, custom_kd=custom_kd)
+    else:
+        robot.send_action(target_deg)
     time.sleep(0.3)
 
 

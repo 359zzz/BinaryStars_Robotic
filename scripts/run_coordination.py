@@ -49,6 +49,40 @@ from bsreal.experiment.coordination import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+OPENARM_GRIPPER_HOLD_KP = {"gripper": 8.0}
+OPENARM_GRIPPER_HOLD_KD = {"gripper": 0.2}
+
+
+def _openarm_dual_gripper_targets(robot) -> tuple[float, float]:
+    left_limits = robot.left_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
+    right_limits = robot.right_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
+    return min(float(left_limits[0]), float(right_limits[0])), max(
+        float(left_limits[1]), float(right_limits[1])
+    )
+
+
+def _send_dual_gripper_repeated(
+    robot,
+    target: float,
+    *,
+    duration_s: float = 0.8,
+    dt: float = 0.05,
+):
+    cmd = {"right_gripper.pos": target, "left_gripper.pos": target}
+    n_steps = max(int(duration_s / dt), 1)
+    for _ in range(n_steps):
+        robot.send_action(
+            cmd,
+            custom_kp=OPENARM_GRIPPER_HOLD_KP,
+            custom_kd=OPENARM_GRIPPER_HOLD_KD,
+        )
+        time.sleep(dt)
+    robot.send_action(
+        cmd,
+        custom_kp=OPENARM_GRIPPER_HOLD_KP,
+        custom_kd=OPENARM_GRIPPER_HOLD_KD,
+    )
+
 
 def make_robot_and_ir(args):
     """Create robot connection and DynamicsIR based on --robot flag."""
@@ -156,11 +190,11 @@ def run_single(args):
                 time.sleep(1.0)
     finally:
         if robot and not args.dry_run:
-            _return_to_zero(robot, n_per_arm)
+            _return_to_zero(robot, n_per_arm, robot_type)
             robot.disconnect()
 
 
-def _return_to_zero(robot, n_per_arm: int):
+def _return_to_zero(robot, n_per_arm: int, robot_type: str):
     """Slowly return all joints to zero before disconnecting."""
     from bsreal.experiment.safety import slow_move
     logger.info("Returning to zero...")
@@ -169,9 +203,22 @@ def _return_to_zero(robot, n_per_arm: int):
         zero[f"right_joint_{i}.pos"] = 0.0
         zero[f"left_joint_{i}.pos"] = 0.0
     obs = robot.get_observation()
-    zero["right_gripper.pos"] = obs.get("right_gripper.pos", 0.0)
-    zero["left_gripper.pos"] = obs.get("left_gripper.pos", 0.0)
-    slow_move(robot, zero, duration_s=4.0)
+    if robot_type == "openarm":
+        gripper_open, _ = _openarm_dual_gripper_targets(robot)
+        _send_dual_gripper_repeated(robot, gripper_open)
+        zero["right_gripper.pos"] = gripper_open
+        zero["left_gripper.pos"] = gripper_open
+        slow_move(
+            robot,
+            zero,
+            duration_s=4.0,
+            custom_kp=OPENARM_GRIPPER_HOLD_KP,
+            custom_kd=OPENARM_GRIPPER_HOLD_KD,
+        )
+    else:
+        zero["right_gripper.pos"] = obs.get("right_gripper.pos", 0.0)
+        zero["left_gripper.pos"] = obs.get("left_gripper.pos", 0.0)
+        slow_move(robot, zero, duration_s=4.0)
 
 
 def run_suite(args):
@@ -202,7 +249,7 @@ def run_suite(args):
         logger.info(f"Suite complete: {summary['n_trials']} trials")
     finally:
         if robot and not args.dry_run:
-            _return_to_zero(robot, n_per_arm)
+            _return_to_zero(robot, n_per_arm, robot_type)
             robot.disconnect()
 
 
