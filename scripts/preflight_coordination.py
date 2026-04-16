@@ -16,18 +16,61 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bsreal.experiment.trajectory import get_start_positions_deg, COORDINATION_CONFIGS
 
 
-def _openarm_dual_gripper_targets() -> tuple[float, float]:
-    # Keep preflight aligned with the real coordination task semantics.
-    return -50.0, 0.0
+GRIPPER_HOLD_KP = {"gripper": 8.0}
+GRIPPER_HOLD_KD = {"gripper": 0.2}
 
 
-def _send_dual_gripper_repeated(robot, target: float, duration_s: float = 1.0, dt: float = 0.05):
+def _openarm_dual_gripper_targets(robot) -> tuple[float, float]:
+    left_limits = robot.left_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
+    right_limits = robot.right_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
+    return min(float(left_limits[0]), float(right_limits[0])), max(
+        float(left_limits[1]), float(right_limits[1])
+    )
+
+
+def _send_dual_gripper_repeated(
+    robot,
+    target: float,
+    duration_s: float = 1.0,
+    dt: float = 0.05,
+    *,
+    soft_hold: bool = False,
+):
     cmd = {"right_gripper.pos": target, "left_gripper.pos": target}
     n_steps = max(int(duration_s / dt), 1)
     for _ in range(n_steps):
-        robot.send_action(cmd)
+        if soft_hold:
+            robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
+        else:
+            robot.send_action(cmd)
         time.sleep(dt)
-    robot.send_action(cmd)
+    if soft_hold:
+        robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
+    else:
+        robot.send_action(cmd)
+
+
+def _send_dual_gripper_pair_repeated(
+    robot,
+    right_target: float,
+    left_target: float,
+    duration_s: float = 0.5,
+    dt: float = 0.05,
+    *,
+    soft_hold: bool = False,
+):
+    cmd = {"right_gripper.pos": right_target, "left_gripper.pos": left_target}
+    n_steps = max(int(duration_s / dt), 1)
+    for _ in range(n_steps):
+        if soft_hold:
+            robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
+        else:
+            robot.send_action(cmd)
+        time.sleep(dt)
+    if soft_hold:
+        robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
+    else:
+        robot.send_action(cmd)
 
 
 def preflight_openarm_dual(left_port: str, right_port: str):
@@ -71,7 +114,9 @@ def preflight_openarm_dual(left_port: str, right_port: str):
 
     # Step 3: Gripper test
     print("[3/6] Gripper test (close then open)...")
-    gripper_open, gripper_close = _openarm_dual_gripper_targets()
+    initial_rg = obs.get("right_gripper.pos", 0.0)
+    initial_lg = obs.get("left_gripper.pos", 0.0)
+    gripper_open, gripper_close = _openarm_dual_gripper_targets(robot)
     _send_dual_gripper_repeated(robot, gripper_close, duration_s=1.0)
     obs_closed = robot.get_observation()
     rg = obs_closed.get("right_gripper.pos", float("nan"))
@@ -88,6 +133,8 @@ def preflight_openarm_dual(left_port: str, right_port: str):
         print("  OK: both grippers responding")
     else:
         print("  WARNING: gripper response may be weak")
+
+    _send_dual_gripper_pair_repeated(robot, initial_rg, initial_lg, duration_s=0.5, soft_hold=True)
 
     # Step 4: Safety limits check
     print("[4/6] Safety limits check...")
@@ -115,10 +162,12 @@ def preflight_openarm_dual(left_port: str, right_port: str):
     # Step 5: Small synchronized motion
     print("[5/6] Synchronized micro-motion (joint_2 +2 deg both arms)...")
     base = {f"{jn}.pos": obs.get(f"{jn}.pos", 0.0) for jn in all_joints}
+    base["right_gripper.pos"] = initial_rg
+    base["left_gripper.pos"] = initial_lg
     target = dict(base)
     target["right_joint_2.pos"] = base["right_joint_2.pos"] + 2.0
     target["left_joint_2.pos"] = base["left_joint_2.pos"] + 2.0
-    robot.send_action(target)
+    robot.send_action(target, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
     time.sleep(0.8)
 
     obs2 = robot.get_observation()
@@ -127,7 +176,7 @@ def preflight_openarm_dual(left_port: str, right_port: str):
     print(f"  Right delta={dr:+.2f}  Left delta={dl:+.2f} deg")
 
     # Return
-    robot.send_action(base)
+    robot.send_action(base, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
     time.sleep(0.5)
 
     sync_error = abs(dr - dl)

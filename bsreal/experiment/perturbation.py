@@ -22,6 +22,9 @@ from bsreal.experiment.safety import (
 
 logger = logging.getLogger(__name__)
 
+GRIPPER_HOLD_KP = 8.0
+GRIPPER_HOLD_KD = 0.2
+
 
 @dataclass
 class PerturbationConfig:
@@ -76,6 +79,11 @@ def run_perturbation_trial(
     data = TrialData()
     omega = 2.0 * math.pi * config.frequency_hz
     base_val = base_positions_deg[perturb_joint]
+    auxiliary_positions_deg = {
+        name: value for name, value in base_positions_deg.items() if name not in joint_names
+    }
+    custom_kp = {"gripper": GRIPPER_HOLD_KP} if "gripper" in auxiliary_positions_deg else None
+    custom_kd = {"gripper": GRIPPER_HOLD_KD} if "gripper" in auxiliary_positions_deg else None
 
     logger.info(
         f"Perturbation: {perturb_joint}, A={config.amplitude_deg} deg, "
@@ -105,8 +113,10 @@ def run_perturbation_trial(
                     cmd[key] = base_val + amp * math.sin(omega * t)
                 else:
                     cmd[key] = base_positions_deg[jn]
+            for aux_name, aux_value in auxiliary_positions_deg.items():
+                cmd[f"{aux_name}.pos"] = aux_value
 
-            robot.send_action(cmd)
+            robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
 
             # Read observation
             obs = robot.get_observation()
@@ -149,7 +159,9 @@ def run_perturbation_trial(
     finally:
         # Return to base position
         cmd = {f"{jn}.pos": base_positions_deg[jn] for jn in joint_names}
-        robot.send_action(cmd)
+        for aux_name, aux_value in auxiliary_positions_deg.items():
+            cmd[f"{aux_name}.pos"] = aux_value
+        robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
 
     logger.info(f"Trial complete: {len(data.timestamps_s)} samples in {t:.1f}s")
     return data

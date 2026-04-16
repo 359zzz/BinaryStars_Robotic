@@ -62,18 +62,28 @@ class CoordinationResult:
     n_samples: int = 0
 
 
-def _gripper_targets(robot_type: str) -> tuple[float, float]:
+def _openarm_gripper_targets(robot) -> tuple[float, float]:
+    if hasattr(robot, "right_arm") and hasattr(robot, "left_arm"):
+        right_limits = robot.right_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
+        left_limits = robot.left_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
+        return min(float(right_limits[0]), float(left_limits[0])), max(
+            float(right_limits[1]), float(left_limits[1])
+        )
+    if hasattr(robot, "config"):
+        limits = robot.config.joint_limits.get("gripper", (-65.0, 0.0))
+        return float(limits[0]), float(limits[1])
+    return -65.0, 0.0
+
+
+def _gripper_targets(robot, robot_type: str) -> tuple[float, float]:
     """Return (open, closed) gripper targets in LeRobot degrees.
 
-    For OpenArm, the real working value in this codebase has been negative
-    opening commands (historically around -50 deg) with 0 deg as closed.
-    Using that working convention is more important than matching a synthetic
-    preflight value that may move feedback numerically without producing a
-    usable physical opening.
+    For OpenArm, infer the real working range from the LeRobot config so the
+    experiment code stays aligned with calibration / side-specific limits.
     """
     if robot_type == "piper":
         return 80.0, 0.0
-    return -50.0, 0.0
+    return _openarm_gripper_targets(robot)
 
 
 def _dual_gripper_cmd(target: float) -> dict[str, float]:
@@ -227,7 +237,7 @@ def run_coordination_trial(
 
     # 2. Object placement
     has_object = coord_config.object_mass_kg > 0
-    gripper_open, gripper_close = _gripper_targets(controller.robot_type)
+    gripper_open, gripper_close = _gripper_targets(robot, controller.robot_type)
     active_gripper_cmd = _current_dual_gripper_cmd(robot)
     if has_object:
         _send_gripper_repeated(robot, gripper_open, duration_s=0.75)

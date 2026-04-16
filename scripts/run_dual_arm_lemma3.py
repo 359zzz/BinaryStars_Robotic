@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 RIGHT_JOINTS = [f"right_joint_{i}" for i in range(1, 8)]
 LEFT_JOINTS = [f"left_joint_{i}" for i in range(1, 8)]
 ALL_JOINTS = RIGHT_JOINTS + LEFT_JOINTS
+GRIPPER_HOLD_KP = {"gripper": 8.0}
+GRIPPER_HOLD_KD = {"gripper": 0.2}
 
 
 def run_cross_arm_trial(robot, perturb_arm: str, perturb_joint_idx: int, args):
@@ -53,6 +55,8 @@ def run_cross_arm_trial(robot, perturb_arm: str, perturb_joint_idx: int, args):
     base_positions = {}
     for jn in ALL_JOINTS:
         base_positions[jn] = obs.get(f"{jn}.pos", 0.0)
+    base_positions["right_gripper"] = obs.get("right_gripper.pos", 0.0)
+    base_positions["left_gripper"] = obs.get("left_gripper.pos", 0.0)
 
     logger.info(f"Perturbing {perturb_jn}, A={pconfig.amplitude_deg} deg")
 
@@ -71,13 +75,13 @@ def run_cross_arm_trial(robot, perturb_arm: str, perturb_joint_idx: int, args):
             amp = pconfig.amplitude_deg * min(t / pconfig.ramp_s, 1.0)
 
             cmd = {}
-            for jn in ALL_JOINTS:
+            for jn, base_val in base_positions.items():
                 if jn == perturb_jn:
-                    cmd[f"{jn}.pos"] = base_positions[jn] + amp * math.sin(omega * t)
+                    cmd[f"{jn}.pos"] = base_val + amp * math.sin(omega * t)
                 else:
-                    cmd[f"{jn}.pos"] = base_positions[jn]
+                    cmd[f"{jn}.pos"] = base_val
 
-            robot.send_action(cmd)
+            robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
             obs = robot.get_observation()
 
             timestamps.append(t)
@@ -90,8 +94,8 @@ def run_cross_arm_trial(robot, perturb_arm: str, perturb_joint_idx: int, args):
     except KeyboardInterrupt:
         logger.info("Interrupted")
     finally:
-        cmd = {f"{jn}.pos": base_positions[jn] for jn in ALL_JOINTS}
-        robot.send_action(cmd)
+        cmd = {f"{jn}.pos": base_val for jn, base_val in base_positions.items()}
+        robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
 
     return {
         "perturb_arm": perturb_arm,
