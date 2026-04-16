@@ -65,13 +65,15 @@ class CoordinationResult:
 def _gripper_targets(robot_type: str) -> tuple[float, float]:
     """Return (open, closed) gripper targets in LeRobot degrees.
 
-    OpenArm's dual-arm preflight uses 90 deg as the open target and 0 deg as
-    closed. Keeping this consistent avoids preflight/trial gripper semantics
-    diverging on the real robot.
+    For OpenArm, the real working value in this codebase has been negative
+    opening commands (historically around -50 deg) with 0 deg as closed.
+    Using that working convention is more important than matching a synthetic
+    preflight value that may move feedback numerically without producing a
+    usable physical opening.
     """
     if robot_type == "piper":
         return 80.0, 0.0
-    return 90.0, 0.0
+    return -50.0, 0.0
 
 
 def _dual_gripper_cmd(target: float) -> dict[str, float]:

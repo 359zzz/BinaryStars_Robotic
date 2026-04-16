@@ -16,6 +16,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bsreal.experiment.trajectory import get_start_positions_deg, COORDINATION_CONFIGS
 
 
+def _openarm_dual_gripper_targets() -> tuple[float, float]:
+    # Keep preflight aligned with the real coordination task semantics.
+    return -50.0, 0.0
+
+
+def _send_dual_gripper_repeated(robot, target: float, duration_s: float = 1.0, dt: float = 0.05):
+    cmd = {"right_gripper.pos": target, "left_gripper.pos": target}
+    n_steps = max(int(duration_s / dt), 1)
+    for _ in range(n_steps):
+        robot.send_action(cmd)
+        time.sleep(dt)
+    robot.send_action(cmd)
+
+
 def preflight_openarm_dual(left_port: str, right_port: str):
     from lerobot.robots.bi_openarm_follower import (
         BiOpenArmFollower, BiOpenArmFollowerConfig,
@@ -57,15 +71,14 @@ def preflight_openarm_dual(left_port: str, right_port: str):
 
     # Step 3: Gripper test
     print("[3/6] Gripper test (close then open)...")
-    robot.send_action({"right_gripper.pos": 0.0, "left_gripper.pos": 0.0})
-    time.sleep(1.0)
+    gripper_open, gripper_close = _openarm_dual_gripper_targets()
+    _send_dual_gripper_repeated(robot, gripper_close, duration_s=1.0)
     obs_closed = robot.get_observation()
     rg = obs_closed.get("right_gripper.pos", float("nan"))
     lg = obs_closed.get("left_gripper.pos", float("nan"))
     print(f"  Closed: right={rg:.1f}  left={lg:.1f}")
 
-    robot.send_action({"right_gripper.pos": 90.0, "left_gripper.pos": 90.0})
-    time.sleep(1.0)
+    _send_dual_gripper_repeated(robot, gripper_open, duration_s=1.0)
     obs_open = robot.get_observation()
     rg2 = obs_open.get("right_gripper.pos", float("nan"))
     lg2 = obs_open.get("left_gripper.pos", float("nan"))
