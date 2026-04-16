@@ -42,6 +42,8 @@ class CoordinationConfig:
     n_repetitions: int = 3
     duration_s: float = 10.0
     dt: float = 0.01
+    precompensate: bool = False   # offline trajectory pre-compensation
+    precomp_alpha: float = 0.3    # pre-compensation gain
 
 
 @dataclass
@@ -58,6 +60,47 @@ class CoordinationResult:
     s_rho_l: float = 0.0
     j_cross_max: float = 0.0
     n_samples: int = 0
+
+
+def _gripper_targets(robot_type: str) -> tuple[float, float]:
+    """Return (open, closed) gripper targets in LeRobot degrees.
+
+    OpenArm's dual-arm preflight uses 90 deg as the open target and 0 deg as
+    closed. Keeping this consistent avoids preflight/trial gripper semantics
+    diverging on the real robot.
+    """
+    if robot_type == "piper":
+        return 80.0, 0.0
+    return 90.0, 0.0
+
+
+def _dual_gripper_cmd(target: float) -> dict[str, float]:
+    return {"right_gripper.pos": target, "left_gripper.pos": target}
+
+
+def _current_dual_gripper_cmd(robot) -> dict[str, float]:
+    obs = robot.get_observation()
+    return {
+        "right_gripper.pos": obs.get("right_gripper.pos", 0.0),
+        "left_gripper.pos": obs.get("left_gripper.pos", 0.0),
+    }
+
+
+def _send_gripper_repeated(
+    robot,
+    target: float,
+    *,
+    duration_s: float = 1.0,
+    dt: float = 0.05,
+) -> dict[str, float]:
+    """Send a dual-gripper command repeatedly so the hold state latches."""
+    cmd = _dual_gripper_cmd(target)
+    n_steps = max(int(duration_s / dt), 1)
+    for _ in range(n_steps):
+        robot.send_action(cmd)
+        time.sleep(dt)
+    robot.send_action(cmd)
+    return cmd
 
 
 def _compute_rmse(target: np.ndarray, actual: np.ndarray, joint_range: range) -> float:
@@ -122,12 +165,30 @@ def run_coordination_trial(
     )
     q_target_all_deg = np.hstack([q_right_deg, q_left_deg])
 
-    # Object spatial inertia
+    # Object spatial inertia (compute early — needed for pre-compensation)
     obj = TASK_OBJECTS[coord_config.task_name]
     M_obj = None
     if obj["mass"] > 0:
         M_obj = make_object_spatial_inertia(
             obj["mass"], obj["geometry"], obj["dims"],
+        )
+
+    # Offline trajectory pre-compensation (for position-controlled robots)
+    if coord_config.precompensate and M_obj is not None:
+        from bsreal.experiment.trajectory_precompensation import (
+            precompensate_trajectory, precompensation_summary,
+        )
+        q_target_all_deg = precompensate_trajectory(
+            q_target_all_deg, ir, n_per_arm, M_obj,
+            alpha=coord_config.precomp_alpha,
+        )
+        summary = precompensation_summary(
+            np.hstack([q_right_deg, q_left_deg]), q_target_all_deg, n_per_arm,
+        )
+        logger.info(
+            f"  Pre-compensation applied: alpha={coord_config.precomp_alpha}, "
+            f"max_corr={summary['max_correction_right_deg']:.2f}° (R), "
+            f"{summary['max_correction_left_deg']:.2f}° (L)"
         )
 
     if dry_run:
@@ -154,31 +215,26 @@ def run_coordination_trial(
         )
         return result
 
-    # 1. Slow move to start
+    # 1. Slow move to start. Keep grippers at their current command during
+    # repositioning so gripper motors do not drop out of the command stream.
     start_pos = get_start_positions_deg(coord_config.config_name)
     start_cmd = {f"{jn}.pos": start_pos.get(jn, 0.0) for jn in all_joint_names}
+    start_cmd.update(_current_dual_gripper_cmd(robot))
     slow_move(robot, start_cmd, duration_s=3.0)
     time.sleep(1.0)
 
     # 2. Object placement
     has_object = coord_config.object_mass_kg > 0
-    # Gripper values differ by robot
-    if controller.robot_type == "piper":
-        gripper_open = 80.0    # Piper: 0=closed, ~100=open
-        gripper_close = 0.0
-    else:
-        gripper_open = -50.0   # OpenArm: -65=open, 0=closed
-        gripper_close = 0.0
+    gripper_open, gripper_close = _gripper_targets(controller.robot_type)
+    active_gripper_cmd = _current_dual_gripper_cmd(robot)
     if has_object:
-        robot.send_action({"right_gripper.pos": gripper_open, "left_gripper.pos": gripper_open})
-        time.sleep(0.5)
+        _send_gripper_repeated(robot, gripper_open, duration_s=0.75)
         input(
             f"\n>>> Grippers open. Place the bar ({coord_config.object_mass_kg} kg) "
             f"between both grippers, then press ENTER..."
         )
-        robot.send_action({"right_gripper.pos": gripper_close, "left_gripper.pos": gripper_close})
         print("  Grippers closing...")
-        time.sleep(2.0)
+        active_gripper_cmd = _send_gripper_repeated(robot, gripper_close, duration_s=2.0)
 
     # 3. Control loop
     logger.info(
@@ -223,6 +279,8 @@ def run_coordination_trial(
                 else:
                     # Piper: apply position compensation
                     cmd[f"{jn}.pos"] = float(q_tgt_deg[j] + math.degrees(tau_ff[j]))
+            if has_object:
+                cmd.update(active_gripper_cmd)
 
             robot.send_action(cmd)
 
@@ -265,10 +323,11 @@ def run_coordination_trial(
         logger.info("Trial interrupted")
     finally:
         # Smoothly return to start, open grippers if object
+        start_cmd.update(active_gripper_cmd)
         slow_move(robot, start_cmd, duration_s=3.0)
         if has_object:
             time.sleep(0.5)
-            robot.send_action({"right_gripper.pos": gripper_open, "left_gripper.pos": gripper_open})
+            _send_gripper_repeated(robot, gripper_open, duration_s=0.75)
             input("\n>>> Trial done. Remove the bar, then press ENTER...")
 
     # 4. Compute RMSE
@@ -306,6 +365,8 @@ def run_coordination_suite(
     configs: list[str] | None = None,
     n_reps: int = 3,
     dry_run: bool = False,
+    precompensate: bool = False,
+    precomp_alpha: float = 0.3,
 ) -> dict:
     """Batch execution: tasks x controllers x configs x reps.
 
@@ -358,6 +419,8 @@ def run_coordination_suite(
                         controller_name=ctrl_name,
                         config_name=config_name,
                         n_repetitions=n_reps,
+                        precompensate=precompensate,
+                        precomp_alpha=precomp_alpha,
                     )
 
                     result = run_coordination_trial(

@@ -122,6 +122,8 @@ def run_single(args):
         config_name=args.config[0],
         n_repetitions=args.reps,
         duration_s=args.duration,
+        precompensate=args.precompensate,
+        precomp_alpha=args.precomp_alpha,
     )
 
     out_dir = Path(args.output_dir)
@@ -166,6 +168,9 @@ def _return_to_zero(robot, n_per_arm: int):
     for i in range(1, n_per_arm + 1):
         zero[f"right_joint_{i}.pos"] = 0.0
         zero[f"left_joint_{i}.pos"] = 0.0
+    obs = robot.get_observation()
+    zero["right_gripper.pos"] = obs.get("right_gripper.pos", 0.0)
+    zero["left_gripper.pos"] = obs.get("left_gripper.pos", 0.0)
     slow_move(robot, zero, duration_s=4.0)
 
 
@@ -191,6 +196,8 @@ def run_suite(args):
             n_per_arm=n_per_arm, robot_type=robot_type,
             tasks=tasks, controllers=controllers, configs=configs,
             n_reps=args.reps, dry_run=args.dry_run,
+            precompensate=args.precompensate,
+            precomp_alpha=args.precomp_alpha,
         )
         logger.info(f"Suite complete: {summary['n_trials']} trials")
     finally:
@@ -217,6 +224,10 @@ def main():
                         help="Validate trajectories without hardware")
     parser.add_argument("--all", action="store_true",
                         help="Run full suite (3 tasks x 4 controllers x 3 configs = 108 trials)")
+    parser.add_argument("--precompensate", action="store_true",
+                        help="Apply offline trajectory pre-compensation (for Piper)")
+    parser.add_argument("--precomp-alpha", type=float, default=0.3,
+                        help="Pre-compensation gain (default: 0.3)")
     args = parser.parse_args()
 
     if args.all or (args.task is None and args.controller is None):
