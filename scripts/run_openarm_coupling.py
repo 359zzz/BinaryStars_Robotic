@@ -44,6 +44,15 @@ CONFIGS = {
 JOINT_NAMES = [f"joint_{i}" for i in range(1, 8)]
 
 
+def _park_gripper_closed(robot):
+    gripper_close = float(robot.config.joint_limits.get("gripper", (-65.0, 0.0))[1])
+    cmd = {"gripper.pos": gripper_close}
+    for _ in range(16):
+        robot.send_action(cmd)
+        time.sleep(0.05)
+    robot.send_action(cmd)
+
+
 def run_config(robot, config_name: str, q_rad: list[float], args):
     """Run perturbation trials for all joints at one configuration."""
     ir = make_openarm_single_arm_ir()
@@ -190,6 +199,7 @@ def main():
         logger.error(f"Error: {e}", exc_info=True)
     finally:
         try:
+            _park_gripper_closed(robot)
             robot.disconnect()
         except Exception:
             pass

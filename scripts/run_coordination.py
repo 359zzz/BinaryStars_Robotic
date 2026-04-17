@@ -67,21 +67,21 @@ def _send_dual_gripper_repeated(
     *,
     duration_s: float = 0.8,
     dt: float = 0.05,
+    custom_kp: dict[str, float] | None = None,
+    custom_kd: dict[str, float] | None = None,
 ):
     cmd = {"right_gripper.pos": target, "left_gripper.pos": target}
     n_steps = max(int(duration_s / dt), 1)
     for _ in range(n_steps):
-        robot.send_action(
-            cmd,
-            custom_kp=OPENARM_GRIPPER_HOLD_KP,
-            custom_kd=OPENARM_GRIPPER_HOLD_KD,
-        )
+        if custom_kp is not None or custom_kd is not None:
+            robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+        else:
+            robot.send_action(cmd)
         time.sleep(dt)
-    robot.send_action(
-        cmd,
-        custom_kp=OPENARM_GRIPPER_HOLD_KP,
-        custom_kd=OPENARM_GRIPPER_HOLD_KD,
-    )
+    if custom_kp is not None or custom_kd is not None:
+        robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+    else:
+        robot.send_action(cmd)
 
 
 def make_robot_and_ir(args):
@@ -204,10 +204,11 @@ def _return_to_zero(robot, n_per_arm: int, robot_type: str):
         zero[f"left_joint_{i}.pos"] = 0.0
     obs = robot.get_observation()
     if robot_type == "openarm":
-        gripper_open, _ = _openarm_dual_gripper_targets(robot)
-        _send_dual_gripper_repeated(robot, gripper_open)
-        zero["right_gripper.pos"] = gripper_open
-        zero["left_gripper.pos"] = gripper_open
+        _, gripper_close = _openarm_dual_gripper_targets(robot)
+        logger.info("Parking empty grippers closed before disconnect.")
+        _send_dual_gripper_repeated(robot, gripper_close, custom_kp=None, custom_kd=None)
+        zero["right_gripper.pos"] = gripper_close
+        zero["left_gripper.pos"] = gripper_close
         slow_move(
             robot,
             zero,

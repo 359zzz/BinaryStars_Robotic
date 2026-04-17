@@ -7,6 +7,20 @@ import sys
 import time
 
 
+def _openarm_gripper_targets(robot) -> tuple[float, float]:
+    limits = robot.config.joint_limits.get("gripper", (-65.0, 0.0))
+    return float(limits[0]), float(limits[1])
+
+
+def _send_gripper_repeated(robot, target: float, duration_s: float = 0.8, dt: float = 0.05):
+    cmd = {"gripper.pos": target}
+    n_steps = max(int(duration_s / dt), 1)
+    for _ in range(n_steps):
+        robot.send_action(cmd)
+        time.sleep(dt)
+    robot.send_action(cmd)
+
+
 def preflight_openarm(port: str, side: str = "right"):
     from lerobot.robots.openarm_follower import OpenArmFollower, OpenArmFollowerConfig
 
@@ -54,7 +68,9 @@ def preflight_openarm(port: str, side: str = "right"):
     else:
         print(f"  WARNING: unexpected delta {delta:.2f}")
 
-    print("[4/4] Disconnecting...")
+    print("[4/4] Parking gripper closed, then disconnecting...")
+    _, gripper_close = _openarm_gripper_targets(robot)
+    _send_gripper_repeated(robot, gripper_close)
     robot.disconnect()
     print("  OK: pre-flight PASSED\n")
 

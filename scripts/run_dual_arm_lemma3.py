@@ -114,6 +114,19 @@ def run_cross_arm_trial(robot, perturb_arm: str, perturb_joint_idx: int, args):
     }
 
 
+def _park_dual_grippers_closed(robot):
+    left_close = float(robot.left_arm.config.joint_limits.get("gripper", (-65.0, 0.0))[1])
+    right_close = float(robot.right_arm.config.joint_limits.get("gripper", (-65.0, 0.0))[1])
+    cmd = {
+        "left_gripper.pos": left_close,
+        "right_gripper.pos": right_close,
+    }
+    for _ in range(16):
+        robot.send_action(cmd)
+        time.sleep(0.05)
+    robot.send_action(cmd)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Dual-arm Lemma 3 verification")
     parser.add_argument("--left-port", default="can1", help="Left arm CAN port")
@@ -171,6 +184,7 @@ def main():
         logger.error(f"Error: {e}", exc_info=True)
     finally:
         try:
+            _park_dual_grippers_closed(robot)
             robot.disconnect()
         except Exception:
             pass

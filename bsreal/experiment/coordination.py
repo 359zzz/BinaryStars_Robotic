@@ -567,11 +567,11 @@ def run_coordination_trial(
             _hold_gripper_target_until_enter(
                 robot,
                 gripper_close,
-                "\n>>> Support or remove the bar, then press ENTER to release the grippers...",
+                "\n>>> Support the bar, then press ENTER to release the grippers...",
                 custom_kp=gripper_hold_kp,
                 custom_kd=gripper_hold_kd,
             )
-            active_gripper_cmd = _send_gripper_repeated(
+            _send_gripper_repeated(
                 robot,
                 gripper_open,
                 duration_s=0.8,
@@ -579,6 +579,29 @@ def run_coordination_trial(
                 custom_kd=gripper_open_latch_kd,
             )
             time.sleep(0.3)
+            _hold_gripper_target_until_enter(
+                robot,
+                gripper_open,
+                "\n>>> Remove the bar completely, then press ENTER to park the empty grippers closed...",
+                custom_kp=gripper_hold_kp,
+                custom_kd=gripper_hold_kd,
+            )
+            if controller.robot_type == "openarm":
+                active_gripper_cmd = _send_gripper_repeated(
+                    robot,
+                    gripper_close,
+                    duration_s=0.8,
+                    custom_kp=None,
+                    custom_kd=None,
+                )
+            else:
+                active_gripper_cmd = _send_gripper_repeated(
+                    robot,
+                    gripper_close,
+                    duration_s=0.6,
+                    custom_kp=gripper_hold_kp,
+                    custom_kd=gripper_hold_kd,
+                )
             logger.info("Cooling grippers for %.1fs before the next trial.", POST_OBJECT_COOLDOWN_S)
             time.sleep(POST_OBJECT_COOLDOWN_S)
 

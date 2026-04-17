@@ -73,6 +73,11 @@ def _send_dual_gripper_pair_repeated(
         robot.send_action(cmd)
 
 
+def _park_openarm_dual_grippers_closed(robot):
+    _, gripper_close = _openarm_dual_gripper_targets(robot)
+    _send_dual_gripper_repeated(robot, gripper_close, duration_s=0.8, soft_hold=False)
+
+
 def preflight_openarm_dual(left_port: str, right_port: str):
     from lerobot.robots.bi_openarm_follower import (
         BiOpenArmFollower, BiOpenArmFollowerConfig,
@@ -191,7 +196,8 @@ def preflight_openarm_dual(left_port: str, right_port: str):
     print(f"  Start positions: { {k: f'{v:.1f}' for k, v in list(start_pos.items())[:4]} } ...")
     print("  OK: trajectory module loaded")
 
-    print("\n[6/6] Disconnecting...")
+    print("\n[6/6] Parking grippers closed, then disconnecting...")
+    _park_openarm_dual_grippers_closed(robot)
     robot.disconnect()
     print("  OK: pre-flight PASSED")
 
