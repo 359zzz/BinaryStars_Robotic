@@ -31,8 +31,12 @@ from bsreal.experiment.safety import slow_move, emergency_freeze, SafetyError
 
 logger = logging.getLogger(__name__)
 
-GRIPPER_LATCH_KP = {"gripper": 10.0}
-GRIPPER_LATCH_KD = {"gripper": 0.25}
+GRIPPER_OPEN_LATCH_KP = {"gripper": 10.0}
+GRIPPER_OPEN_LATCH_KD = {"gripper": 0.25}
+GRIPPER_CLOSE_LATCH_STAGES = [
+    ({"gripper": 12.0}, {"gripper": 0.28}, 0.9),
+    ({"gripper": 18.0}, {"gripper": 0.40}, 0.8),
+]
 GRIPPER_HOLD_KP = {"gripper": 8.0}
 GRIPPER_HOLD_KD = {"gripper": 0.2}
 
@@ -128,6 +132,94 @@ def _send_gripper_repeated(
         time.sleep(dt)
     _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
     return cmd
+
+
+def _gripper_progress_toward_target(
+    position: float,
+    open_target: float,
+    close_target: float,
+) -> float:
+    stroke = close_target - open_target
+    if abs(stroke) < 1e-6:
+        return 0.0
+    return float((position - open_target) / stroke)
+
+
+def _gripper_close_motion_sufficient(
+    robot,
+    *,
+    open_target: float,
+    close_target: float,
+    min_fraction: float = 0.12,
+    min_delta_deg: float = 4.0,
+) -> bool:
+    obs = robot.get_observation()
+    required_delta = max(min_delta_deg, abs(close_target - open_target) * min_fraction)
+    positions = {
+        "right_gripper.pos": obs.get("right_gripper.pos", open_target),
+        "left_gripper.pos": obs.get("left_gripper.pos", open_target),
+    }
+    moved = {
+        key: abs(value - open_target)
+        for key, value in positions.items()
+    }
+    progress = {
+        key: _gripper_progress_toward_target(value, open_target, close_target)
+        for key, value in positions.items()
+    }
+    if all(delta >= required_delta for delta in moved.values()):
+        return True
+
+    logger.warning(
+        "Gripper close motion below threshold: "
+        "right=%.2fdeg (%.2f) left=%.2fdeg (%.2f) required>=%.2fdeg",
+        moved["right_gripper.pos"],
+        progress["right_gripper.pos"],
+        moved["left_gripper.pos"],
+        progress["left_gripper.pos"],
+        required_delta,
+    )
+    return False
+
+
+def _close_grippers_with_escalation(
+    robot,
+    *,
+    open_target: float,
+    close_target: float,
+    hold_kp=None,
+    hold_kd=None,
+) -> dict[str, float]:
+    for stage_index, (stage_kp, stage_kd, duration_s) in enumerate(
+        GRIPPER_CLOSE_LATCH_STAGES,
+        start=1,
+    ):
+        _send_gripper_repeated(
+            robot,
+            close_target,
+            duration_s=duration_s,
+            custom_kp=stage_kp,
+            custom_kd=stage_kd,
+        )
+        if _gripper_close_motion_sufficient(
+            robot,
+            open_target=open_target,
+            close_target=close_target,
+        ):
+            logger.info("Gripper close stage %d succeeded", stage_index)
+            break
+        logger.warning(
+            "Gripper close stage %d did not produce enough motion; escalating.",
+            stage_index,
+        )
+
+    return _send_gripper_repeated(
+        robot,
+        close_target,
+        duration_s=0.8,
+        custom_kp=hold_kp,
+        custom_kd=hold_kd,
+    )
 
 
 def _hold_gripper_target_until_enter(
@@ -292,8 +384,8 @@ def run_coordination_trial(
     has_object = coord_config.object_mass_kg > 0
     gripper_open, gripper_close = _gripper_targets(robot, controller.robot_type)
     active_gripper_cmd = _current_dual_gripper_cmd(robot)
-    gripper_latch_kp = GRIPPER_LATCH_KP if controller.robot_type == "openarm" else None
-    gripper_latch_kd = GRIPPER_LATCH_KD if controller.robot_type == "openarm" else None
+    gripper_open_latch_kp = GRIPPER_OPEN_LATCH_KP if controller.robot_type == "openarm" else None
+    gripper_open_latch_kd = GRIPPER_OPEN_LATCH_KD if controller.robot_type == "openarm" else None
     gripper_hold_kp = GRIPPER_HOLD_KP if controller.robot_type == "openarm" else None
     gripper_hold_kd = GRIPPER_HOLD_KD if controller.robot_type == "openarm" else None
     if has_object:
@@ -301,8 +393,8 @@ def run_coordination_trial(
             robot,
             gripper_open,
             duration_s=0.5,
-            custom_kp=gripper_latch_kp,
-            custom_kd=gripper_latch_kd,
+            custom_kp=gripper_open_latch_kp,
+            custom_kd=gripper_open_latch_kd,
         )
         _hold_gripper_target_until_enter(
             robot,
@@ -316,20 +408,22 @@ def run_coordination_trial(
             custom_kd=gripper_hold_kd,
         )
         print("  Grippers closing...")
-        _send_gripper_repeated(
-            robot,
-            gripper_close,
-            duration_s=1.25,
-            custom_kp=gripper_latch_kp,
-            custom_kd=gripper_latch_kd,
-        )
-        active_gripper_cmd = _send_gripper_repeated(
-            robot,
-            gripper_close,
-            duration_s=0.6,
-            custom_kp=gripper_hold_kp,
-            custom_kd=gripper_hold_kd,
-        )
+        if controller.robot_type == "openarm":
+            active_gripper_cmd = _close_grippers_with_escalation(
+                robot,
+                open_target=gripper_open,
+                close_target=gripper_close,
+                hold_kp=gripper_hold_kp,
+                hold_kd=gripper_hold_kd,
+            )
+        else:
+            active_gripper_cmd = _send_gripper_repeated(
+                robot,
+                gripper_close,
+                duration_s=0.6,
+                custom_kp=gripper_hold_kp,
+                custom_kd=gripper_hold_kd,
+            )
 
     # 3. Control loop
     logger.info(
@@ -434,8 +528,8 @@ def run_coordination_trial(
                 robot,
                 gripper_open,
                 duration_s=0.8,
-                custom_kp=gripper_latch_kp,
-                custom_kd=gripper_latch_kd,
+                custom_kp=gripper_open_latch_kp,
+                custom_kd=gripper_open_latch_kd,
             )
             time.sleep(0.3)
 
