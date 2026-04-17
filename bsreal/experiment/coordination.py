@@ -31,14 +31,22 @@ from bsreal.experiment.safety import slow_move, emergency_freeze, SafetyError
 
 logger = logging.getLogger(__name__)
 
+HEAVY_OBJECT_MASS_KG = 1.0
 GRIPPER_OPEN_LATCH_KP = {"gripper": 10.0}
 GRIPPER_OPEN_LATCH_KD = {"gripper": 0.25}
-GRIPPER_CLOSE_LATCH_STAGES = [
-    ({"gripper": 12.0}, {"gripper": 0.28}, 0.9),
-    ({"gripper": 18.0}, {"gripper": 0.40}, 0.8),
+GRIPPER_CLOSE_LATCH_STAGES_LIGHT = [
+    (None, None, 1.0),
+    ({"gripper": 28.0}, {"gripper": 0.40}, 0.8),
+]
+GRIPPER_CLOSE_LATCH_STAGES_HEAVY = [
+    (None, None, 1.2),
+    ({"gripper": 32.0}, {"gripper": 0.45}, 1.0),
 ]
 GRIPPER_HOLD_KP = {"gripper": 8.0}
 GRIPPER_HOLD_KD = {"gripper": 0.2}
+GRIPPER_HEAVY_HOLD_KP = {"gripper": 10.0}
+GRIPPER_HEAVY_HOLD_KD = {"gripper": 0.25}
+POST_OBJECT_COOLDOWN_S = 4.0
 
 
 @dataclass
@@ -187,38 +195,65 @@ def _close_grippers_with_escalation(
     *,
     open_target: float,
     close_target: float,
+    close_stages: list[tuple[dict[str, float] | None, dict[str, float] | None, float]],
+    open_latch_kp=None,
+    open_latch_kd=None,
     hold_kp=None,
     hold_kd=None,
 ) -> dict[str, float]:
-    for stage_index, (stage_kp, stage_kd, duration_s) in enumerate(
-        GRIPPER_CLOSE_LATCH_STAGES,
-        start=1,
-    ):
-        _send_gripper_repeated(
-            robot,
-            close_target,
-            duration_s=duration_s,
-            custom_kp=stage_kp,
-            custom_kd=stage_kd,
-        )
-        if _gripper_close_motion_sufficient(
-            robot,
-            open_target=open_target,
-            close_target=close_target,
-        ):
-            logger.info("Gripper close stage %d succeeded", stage_index)
-            break
-        logger.warning(
-            "Gripper close stage %d did not produce enough motion; escalating.",
-            stage_index,
-        )
+    for attempt_index in range(2):
+        for stage_index, (stage_kp, stage_kd, duration_s) in enumerate(close_stages, start=1):
+            _send_gripper_repeated(
+                robot,
+                close_target,
+                duration_s=duration_s,
+                custom_kp=stage_kp,
+                custom_kd=stage_kd,
+            )
+            if _gripper_close_motion_sufficient(
+                robot,
+                open_target=open_target,
+                close_target=close_target,
+            ):
+                logger.info(
+                    "Gripper close attempt %d stage %d succeeded",
+                    attempt_index + 1,
+                    stage_index,
+                )
+                return _send_gripper_repeated(
+                    robot,
+                    close_target,
+                    duration_s=0.8,
+                    custom_kp=hold_kp,
+                    custom_kd=hold_kd,
+                )
+            logger.warning(
+                "Gripper close attempt %d stage %d did not produce enough motion; escalating.",
+                attempt_index + 1,
+                stage_index,
+            )
 
-    return _send_gripper_repeated(
-        robot,
-        close_target,
-        duration_s=0.8,
-        custom_kp=hold_kp,
-        custom_kd=hold_kd,
+        if attempt_index == 0:
+            logger.warning("Gripper close failed after all stages; requesting manual reseat before retry.")
+            _send_gripper_repeated(
+                robot,
+                open_target,
+                duration_s=0.5,
+                custom_kp=open_latch_kp,
+                custom_kd=open_latch_kd,
+            )
+            _hold_gripper_target_until_enter(
+                robot,
+                open_target,
+                "\n>>> Grippers still did not close enough. Re-seat the bar and press ENTER to retry close...",
+                custom_kp=hold_kp,
+                custom_kd=hold_kd,
+            )
+            continue
+
+    raise SafetyError(
+        "Grippers failed to close onto the bar after automatic retry. "
+        "Re-seat the payload or reduce the load before rerunning the trial."
     )
 
 
@@ -238,8 +273,8 @@ def _hold_gripper_target_until_enter(
     def _worker():
         while not stop_event.is_set():
             _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
-            time.sleep(dt)
-        _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+            if stop_event.wait(dt):
+                break
 
     worker = threading.Thread(target=_worker, name="coordination-gripper-hold", daemon=True)
     worker.start()
@@ -247,7 +282,7 @@ def _hold_gripper_target_until_enter(
         input(prompt)
     finally:
         stop_event.set()
-        worker.join(timeout=max(0.2, 4 * dt))
+        worker.join()
     return cmd
 
 
@@ -384,10 +419,19 @@ def run_coordination_trial(
     has_object = coord_config.object_mass_kg > 0
     gripper_open, gripper_close = _gripper_targets(robot, controller.robot_type)
     active_gripper_cmd = _current_dual_gripper_cmd(robot)
+    is_heavy_object = coord_config.object_mass_kg >= HEAVY_OBJECT_MASS_KG
     gripper_open_latch_kp = GRIPPER_OPEN_LATCH_KP if controller.robot_type == "openarm" else None
     gripper_open_latch_kd = GRIPPER_OPEN_LATCH_KD if controller.robot_type == "openarm" else None
-    gripper_hold_kp = GRIPPER_HOLD_KP if controller.robot_type == "openarm" else None
-    gripper_hold_kd = GRIPPER_HOLD_KD if controller.robot_type == "openarm" else None
+    if controller.robot_type == "openarm":
+        gripper_hold_kp = GRIPPER_HEAVY_HOLD_KP if is_heavy_object else GRIPPER_HOLD_KP
+        gripper_hold_kd = GRIPPER_HEAVY_HOLD_KD if is_heavy_object else GRIPPER_HOLD_KD
+        gripper_close_stages = (
+            GRIPPER_CLOSE_LATCH_STAGES_HEAVY if is_heavy_object else GRIPPER_CLOSE_LATCH_STAGES_LIGHT
+        )
+    else:
+        gripper_hold_kp = None
+        gripper_hold_kd = None
+        gripper_close_stages = []
     if has_object:
         _send_gripper_repeated(
             robot,
@@ -413,6 +457,9 @@ def run_coordination_trial(
                 robot,
                 open_target=gripper_open,
                 close_target=gripper_close,
+                close_stages=gripper_close_stages,
+                open_latch_kp=gripper_open_latch_kp,
+                open_latch_kd=gripper_open_latch_kd,
                 hold_kp=gripper_hold_kp,
                 hold_kd=gripper_hold_kd,
             )
@@ -532,6 +579,8 @@ def run_coordination_trial(
                 custom_kd=gripper_open_latch_kd,
             )
             time.sleep(0.3)
+            logger.info("Cooling grippers for %.1fs before the next trial.", POST_OBJECT_COOLDOWN_S)
+            time.sleep(POST_OBJECT_COOLDOWN_S)
 
         # Return only after the grippers have been unloaded/opened.
         start_cmd.update(active_gripper_cmd)
