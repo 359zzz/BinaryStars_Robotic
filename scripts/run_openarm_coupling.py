@@ -144,7 +144,7 @@ def run_config(robot, config_name: str, q_rad: list[float], args):
         time.sleep(1.0)
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="OpenArm single-arm coupling experiment")
     parser.add_argument("--port", default="can0", help="CAN interface")
     parser.add_argument("--side", default="right", help="Arm side")
@@ -174,7 +174,7 @@ def main():
             pairs.sort(reverse=True)
             for val, i, j in pairs[:5]:
                 logger.info(f"    ({i},{j}): |J|={val:.4f}")
-        return
+        return 0
 
     # Connect to robot
     from lerobot.robots.openarm_follower import OpenArmFollower, OpenArmFollowerConfig
@@ -192,11 +192,14 @@ def main():
             run_config(robot, name, q, args)
 
         logger.info("All trials complete!")
+        return 0
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
+        return 130
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
+        return 1
     finally:
         try:
             _park_gripper_closed(robot)
@@ -206,4 +209,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

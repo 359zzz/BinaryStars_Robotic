@@ -10,6 +10,7 @@ import math
 import time
 import logging
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 import numpy as np
 
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 GRIPPER_HOLD_KP = 8.0
 GRIPPER_HOLD_KD = 0.2
+CAN_BUFFER_ERRNO = 105
+CAN_RETRY_DELAYS_S = (0.02, 0.05, 0.1, 0.2)
 
 
 @dataclass
@@ -47,6 +50,79 @@ class TrialData:
     velocities_deg_s: list[list[float]] = field(default_factory=list)
     torques_Nm: list[list[float]] = field(default_factory=list)
     commanded_deg: list[list[float]] = field(default_factory=list)
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        chain.append(current)
+        seen.add(id(current))
+        next_exc = current.__cause__ or current.__context__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+    return chain
+
+
+def _is_transient_can_buffer_error(exc: BaseException) -> bool:
+    for item in _exception_chain(exc):
+        if isinstance(item, OSError) and getattr(item, "errno", None) == CAN_BUFFER_ERRNO:
+            return True
+        message = str(item)
+        if "No buffer space available" in message:
+            return True
+        if "Error Code 105" in message:
+            return True
+    return False
+
+
+def _call_with_can_retry(
+    op: Callable[[], Any],
+    *,
+    label: str,
+    max_attempts: int = 1 + len(CAN_RETRY_DELAYS_S),
+) -> Any:
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return op()
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_can_buffer_error(exc) or attempt >= max_attempts:
+                raise
+            delay_s = CAN_RETRY_DELAYS_S[min(attempt - 1, len(CAN_RETRY_DELAYS_S) - 1)]
+            logger.warning(
+                "%s hit transient CAN buffer saturation on attempt %d/%d; backing off %.3fs",
+                label,
+                attempt,
+                max_attempts,
+                delay_s,
+            )
+            time.sleep(delay_s)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError(f"{label} failed without raising an exception")
+
+
+def _send_action_with_retry(
+    robot,
+    cmd: dict[str, float],
+    *,
+    custom_kp=None,
+    custom_kd=None,
+    label: str,
+) -> None:
+    def _send() -> None:
+        robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+
+    _call_with_can_retry(_send, label=label)
+
+
+def _get_observation_with_retry(robot, *, label: str) -> dict[str, float]:
+    def _read() -> dict[str, float]:
+        return robot.get_observation()
+
+    return _call_with_can_retry(_read, label=label)
 
 
 def run_perturbation_trial(
@@ -92,6 +168,7 @@ def run_perturbation_trial(
 
     t0 = time.monotonic()
     n_errors = 0
+    t = 0.0
 
     try:
         while True:
@@ -116,10 +193,19 @@ def run_perturbation_trial(
             for aux_name, aux_value in auxiliary_positions_deg.items():
                 cmd[f"{aux_name}.pos"] = aux_value
 
-            robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+            _send_action_with_retry(
+                robot,
+                cmd,
+                custom_kp=custom_kp,
+                custom_kd=custom_kd,
+                label=f"{perturb_joint}:send_action",
+            )
 
             # Read observation
-            obs = robot.get_observation()
+            obs = _get_observation_with_retry(
+                robot,
+                label=f"{perturb_joint}:get_observation",
+            )
 
             # Record data
             data.timestamps_s.append(t)
@@ -161,7 +247,16 @@ def run_perturbation_trial(
         cmd = {f"{jn}.pos": base_positions_deg[jn] for jn in joint_names}
         for aux_name, aux_value in auxiliary_positions_deg.items():
             cmd[f"{aux_name}.pos"] = aux_value
-        robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+        try:
+            _send_action_with_retry(
+                robot,
+                cmd,
+                custom_kp=custom_kp,
+                custom_kd=custom_kd,
+                label=f"{perturb_joint}:return_to_base",
+            )
+        except Exception:
+            logger.exception("Failed to return %s trial to base position cleanly", perturb_joint)
 
     logger.info(f"Trial complete: {len(data.timestamps_s)} samples in {t:.1f}s")
     return data
