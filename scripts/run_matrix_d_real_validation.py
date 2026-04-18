@@ -14,6 +14,21 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "matrix_d_real"
+DEFAULT_CONTROL_CONTROLLER_MAP = {
+    "decoupled_ref": ("decoupled", {}),
+    "j_coupled_eng": ("j_coupled", {"kp_comp": 2.0, "kd_comp": 0.1, "alpha_pos": 0.3}),
+    "c_coupled_cross": ("c_coupled", {"kp_comp": 2.0, "kd_comp": 0.1, "alpha_pos": 0.3}),
+    "s_adaptive_entropy": (
+        "s_adaptive",
+        {
+            "kp_comp": 2.0,
+            "kd_comp": 0.1,
+            "alpha_pos": 0.3,
+            "s_threshold": 0.3,
+            "recompute_every": 10,
+        },
+    ),
+}
 
 
 def utc_now_iso() -> str:
@@ -34,8 +49,9 @@ def dump_json(path: Path, payload: dict[str, Any]) -> None:
 def validate_matrix_c2_real(payload: dict[str, Any]) -> None:
     if payload.get("schema") != "matrix_c2_real_v1":
         raise ValueError("Expected matrix_c2_real_v1 payload")
-    if payload.get("source_family_type") != "morphology":
-        raise ValueError("This D_real_v1 runner currently supports morphology family payloads only")
+    family_type = str(payload.get("source_family_type"))
+    if family_type not in {"morphology", "control"}:
+        raise ValueError("This D_real_v1 runner supports only morphology or control family payloads")
 
     risk_guards = payload.get("risk_guards", {})
     if risk_guards.get("pair_margin_sign_policy") != "distinguishability_only":
@@ -46,6 +62,8 @@ def validate_matrix_c2_real(payload: dict[str, Any]) -> None:
         raise ValueError("Matrix C2 real payload must reserve a reference baseline")
     if risk_guards.get("decision_semantics") != "real_robot_validation_routing_not_winner":
         raise ValueError("Matrix C2 real payload must remain routing-only")
+    if family_type == "control" and not risk_guards.get("engineering_anchor_reserved", False):
+        raise ValueError("Control Matrix C2 real payload must reserve an engineering anchor")
 
 
 def build_candidate_index(graph_payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
@@ -67,10 +85,10 @@ def local_joint_indices_from_probe_pair(probe_pair: list[int], n_per_arm: int = 
     return sorted(local_joint_indices)
 
 
-def infer_probe_joints(
+def infer_probe_pairs(
     c2_payload: dict[str, Any],
     graph_payload: dict[str, Any] | None,
-) -> list[int]:
+) -> list[list[int]]:
     graph_edges = {}
     if graph_payload:
         for edge in graph_payload.get("edges", []):
@@ -78,17 +96,34 @@ def infer_probe_joints(
             if edge_id:
                 graph_edges[str(edge_id)] = edge
 
-    local_joint_indices: list[int] = []
+    probe_pairs: list[list[int]] = []
+    seen: set[tuple[int, int]] = set()
     for row in c2_payload.get("pairwise_validation_order", []):
         edge_id = row.get("evidence_edge_id")
         if not edge_id:
             continue
         edge = graph_edges.get(str(edge_id), {})
         probe_pair = edge.get("probe_pair")
-        if isinstance(probe_pair, list):
-            for local_idx in local_joint_indices_from_probe_pair(probe_pair):
-                if local_idx not in local_joint_indices:
-                    local_joint_indices.append(local_idx)
+        if not isinstance(probe_pair, list) or len(probe_pair) != 2:
+            continue
+        key = (int(probe_pair[0]), int(probe_pair[1]))
+        if key in seen:
+            continue
+        seen.add(key)
+        probe_pairs.append([key[0], key[1]])
+
+    return probe_pairs or [[6, 13]]
+
+
+def infer_probe_joints(
+    c2_payload: dict[str, Any],
+    graph_payload: dict[str, Any] | None,
+) -> list[int]:
+    local_joint_indices: list[int] = []
+    for probe_pair in infer_probe_pairs(c2_payload, graph_payload):
+        for local_idx in local_joint_indices_from_probe_pair(probe_pair):
+            if local_idx not in local_joint_indices:
+                local_joint_indices.append(local_idx)
 
     return local_joint_indices or [6]
 
@@ -149,16 +184,48 @@ def make_manual_step(
     }
 
 
+def control_candidate_spec(
+    candidate_id: str,
+    candidate_node: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any]]:
+    if candidate_node:
+        controller_name = candidate_node.get("controller_name")
+        controller_params = candidate_node.get("controller_params", {})
+        if isinstance(controller_name, str) and controller_name:
+            if not isinstance(controller_params, dict):
+                controller_params = {}
+            return controller_name, dict(controller_params)
+
+    fallback_name, fallback_params = DEFAULT_CONTROL_CONTROLLER_MAP.get(
+        candidate_id,
+        ("decoupled", {}),
+    )
+    return fallback_name, dict(fallback_params)
+
+
 def candidate_validation_steps(
     *,
     candidate_id: str,
     role: str,
     candidate_node: dict[str, Any] | None,
     feasibility_row: dict[str, Any] | None,
+    family_type: str,
+    probe_pairs: list[list[int]],
     local_probe_joints: list[int],
     args: argparse.Namespace,
     candidate_dir: Path,
 ) -> list[dict[str, Any]]:
+    if family_type == "control":
+        return control_candidate_validation_steps(
+            candidate_id=candidate_id,
+            role=role,
+            candidate_node=candidate_node,
+            feasibility_row=feasibility_row,
+            probe_pairs=probe_pairs,
+            args=args,
+            candidate_dir=candidate_dir,
+        )
+
     steps: list[dict[str, Any]] = []
     is_reference = role == "reference_baseline"
 
@@ -331,6 +398,139 @@ def candidate_validation_steps(
     return steps
 
 
+def control_candidate_validation_steps(
+    *,
+    candidate_id: str,
+    role: str,
+    candidate_node: dict[str, Any] | None,
+    feasibility_row: dict[str, Any] | None,
+    probe_pairs: list[list[int]],
+    args: argparse.Namespace,
+    candidate_dir: Path,
+) -> list[dict[str, Any]]:
+    steps: list[dict[str, Any]] = []
+    controller_name, controller_params = control_candidate_spec(candidate_id, candidate_node)
+    controller_params_json = json.dumps(controller_params, separators=(",", ":"), ensure_ascii=False)
+
+    steps.append(
+        make_command_step(
+            step_id=f"{candidate_id}_d1_preflight_dual_arm",
+            stage="D1_probe_matched_physical_check",
+            protocol_family="preflight_dual_arm",
+            description="Dual-arm preflight before controller-sensitive D1 probe and downstream validation.",
+            command=[
+                args.python,
+                "scripts/preflight_coordination.py",
+                "--robot",
+                args.robot,
+                "--left-port",
+                args.left_port,
+                "--right-port",
+                args.right_port,
+            ],
+            output_dir=None,
+            supports_dry_run=False,
+        )
+    )
+
+    if not args.skip_control_probe:
+        for probe_pair in probe_pairs:
+            probe_dir = candidate_dir / f"control_probe_pair_{probe_pair[0]}_{probe_pair[1]}"
+            command = [
+                args.python,
+                "scripts/run_control_probe.py",
+                "--robot",
+                args.robot,
+                "--left-port",
+                args.left_port,
+                "--right-port",
+                args.right_port,
+                "--task",
+                args.control_probe_task,
+                "--config",
+                args.coordination_config,
+                "--controller",
+                controller_name,
+                "--controller-params-json",
+                controller_params_json,
+                "--probe-pair",
+                str(probe_pair[0]),
+                str(probe_pair[1]),
+                "--amplitude",
+                str(args.control_probe_amplitude),
+                "--frequency",
+                str(args.control_probe_frequency),
+                "--duration",
+                str(args.control_probe_duration),
+                "--output-dir",
+                str(probe_dir),
+            ]
+            if args.dry_run:
+                command.append("--dry-run")
+            steps.append(
+                make_command_step(
+                    step_id=f"{candidate_id}_d1_control_probe_pair_{probe_pair[0]}_{probe_pair[1]}",
+                    stage="D1_probe_matched_physical_check",
+                    protocol_family="control_probe",
+                    description="Controller-sensitive dual-arm probe aligned with the Matrix B probe pair.",
+                    command=command,
+                    output_dir=probe_dir,
+                    supports_dry_run=True,
+                    notes=[
+                        "This is the control-family D1 check and should vary with the deployed controller candidate.",
+                        "Interpret it as matched downstream validation support, not as a QPU winner declaration.",
+                    ],
+                )
+            )
+
+    if args.include_coordination:
+        for task_name in args.coordination_tasks:
+            coordination_dir = candidate_dir / f"coordination_{task_name}"
+            command = [
+                args.python,
+                "scripts/run_coordination.py",
+                "--robot",
+                args.robot,
+                "--task",
+                task_name,
+                "--controller",
+                controller_name,
+                "--controller-params-json",
+                controller_params_json,
+                "--config",
+                args.coordination_config,
+                "--reps",
+                str(args.coordination_reps),
+                "--duration",
+                str(args.coordination_duration),
+                "--left-port",
+                args.left_port,
+                "--right-port",
+                args.right_port,
+                "--output-dir",
+                str(coordination_dir),
+            ]
+            if args.dry_run:
+                command.append("--dry-run")
+            steps.append(
+                make_command_step(
+                    step_id=f"{candidate_id}_d2_coordination_{task_name}",
+                    stage="D2_downstream_task_battery",
+                    protocol_family="downstream_coordination",
+                    description=f"Same-robot downstream coordination validation under task={task_name}.",
+                    command=command,
+                    output_dir=coordination_dir,
+                    supports_dry_run=True,
+                    notes=[
+                        f"Controller candidate: {controller_name}",
+                        "This is the real downstream battery for control-family routing on a fixed robot body.",
+                    ],
+                )
+            )
+
+    return steps
+
+
 def scheduling_decision(
     route_status: str,
     *,
@@ -338,6 +538,8 @@ def scheduling_decision(
 ) -> tuple[bool, str]:
     if route_status == "reference_baseline":
         return True, "baseline_reference"
+    if route_status == "engineering_anchor_validate":
+        return True, "engineering_anchor_reference"
     if route_status == "primary_validate":
         return True, "primary_validation_target"
     if route_status == "secondary_validate":
@@ -360,6 +562,8 @@ def build_manifest(
 ) -> dict[str, Any]:
     validate_matrix_c2_real(c2_payload)
     candidate_index = build_candidate_index(graph_payload)
+    family_type = str(c2_payload.get("source_family_type"))
+    probe_pairs = infer_probe_pairs(c2_payload, graph_payload)
     local_probe_joints = infer_probe_joints(c2_payload, graph_payload)
 
     run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -378,6 +582,7 @@ def build_manifest(
     if baseline_id:
         ordered_candidate_ids.append(baseline_id)
     for key in [
+        "engineering_anchor_validate_candidates",
         "primary_validate_candidates",
         "secondary_validate_candidates",
         "optional_or_deferred_candidates",
@@ -394,6 +599,11 @@ def build_manifest(
         role = route_row.get("route_status", "unknown")
         feasibility_row = dict(route_row.get("feasibility", {}))
         candidate_node = candidate_index.get(candidate_id)
+        controller_name, controller_params = (
+            control_candidate_spec(candidate_id, candidate_node)
+            if family_type == "control"
+            else (None, {})
+        )
         candidate_dir = run_dir / candidate_id
         scheduled_for_execution, scheduling_reason = scheduling_decision(
             str(role),
@@ -406,6 +616,8 @@ def build_manifest(
                 role=str(role),
                 candidate_node=candidate_node,
                 feasibility_row=feasibility_row,
+                family_type=family_type,
+                probe_pairs=probe_pairs,
                 local_probe_joints=local_probe_joints,
                 args=args,
                 candidate_dir=candidate_dir,
@@ -419,6 +631,8 @@ def build_manifest(
                 "priority_score": route_row.get("priority_score"),
                 "supporting_edge_ids": route_row.get("supporting_edge_ids", []),
                 "feasibility": feasibility_row,
+                "controller_name": controller_name,
+                "controller_params": controller_params,
                 "scheduled_for_execution": scheduled_for_execution,
                 "scheduling_reason": scheduling_reason,
                 "label": (candidate_node or {}).get("label", candidate_id),
@@ -447,7 +661,7 @@ def build_manifest(
         "source_matrix_c2_real_path": str(Path(args.c2_real_input).resolve()),
         "source_graph_path": str(Path(args.graph_input).resolve()) if args.graph_input else None,
         "source_graph_id": c2_payload.get("source_graph_id"),
-        "source_family_type": c2_payload.get("source_family_type"),
+        "source_family_type": family_type,
         "source_context": c2_payload.get("source_context", {}),
         "source_matrix_c_readiness": c2_payload.get("source_matrix_c_readiness"),
         "risk_guards": c2_payload.get("risk_guards", {}),
@@ -463,18 +677,35 @@ def build_manifest(
             "coordination_reps": args.coordination_reps,
             "coordination_duration": args.coordination_duration,
             "include_optional_candidates": args.include_optional_candidates,
+            "control_probe_task": args.control_probe_task,
+            "control_probe_amplitude": args.control_probe_amplitude,
+            "control_probe_frequency": args.control_probe_frequency,
+            "control_probe_duration": args.control_probe_duration,
+            "skip_control_probe": args.skip_control_probe,
         },
         "decision_semantics": {
             "mode": c2_payload.get("routing_mode"),
-            "notes": [
-                "D_real_v1 consumes C2 real routing and does not reinterpret QPU pair margins.",
-                "Baseline remains a physical reference rather than a competing winner candidate.",
-                "Only baseline, primary, and secondary candidates are scheduled by default.",
-                "Optional candidates require explicit opt-in before they enter real-robot execution.",
-                "Abstained and deferred candidates are explicitly excluded from real-robot execution until support or readiness improves.",
-            ],
+            "notes": (
+                [
+                    "D_real_v1 consumes C2 real routing and does not reinterpret QPU pair margins.",
+                    "Baseline remains a physical reference rather than a competing winner candidate.",
+                    "Only baseline, primary, and secondary candidates are scheduled by default.",
+                    "Optional candidates require explicit opt-in before they enter real-robot execution.",
+                    "Abstained and deferred candidates are explicitly excluded from real-robot execution until support or readiness improves.",
+                ]
+                if family_type != "control"
+                else [
+                    "D_control_real_v1 consumes C2 real routing over same-robot controller candidates.",
+                    "Reference baseline and engineering anchor are reserved comparators rather than winner claims.",
+                    "D1 uses a controller-sensitive probe aligned with the Matrix B probe pair before D2 downstream tasks.",
+                    "Optional candidates require explicit opt-in before they enter real-robot execution.",
+                    "Abstained and deferred candidates are explicitly excluded from real-robot execution until support or readiness improves.",
+                ]
+            ),
         },
         "reference_candidate_id": baseline_id,
+        "engineering_anchor_candidate_id": c2_payload.get("engineering_anchor_candidate_id"),
+        "probe_pairs": probe_pairs,
         "local_probe_joint_indices": local_probe_joints,
         "pairwise_validation_order": c2_payload.get("pairwise_validation_order", []),
         "real_validation_execution_order": execution_order,
@@ -574,6 +805,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--coordination-tasks", nargs="+", default=["bar_only", "bar_loaded"], choices=["independent", "bar_only", "bar_loaded"])
     parser.add_argument("--coordination-reps", type=int, default=3)
     parser.add_argument("--coordination-duration", type=float, default=10.0)
+    parser.add_argument("--control-probe-task", default="bar_loaded", choices=["independent", "bar_only", "bar_loaded"])
+    parser.add_argument("--control-probe-amplitude", type=float, default=3.0)
+    parser.add_argument("--control-probe-frequency", type=float, default=0.5)
+    parser.add_argument("--control-probe-duration", type=float, default=10.0)
+    parser.add_argument("--skip-control-probe", action="store_true", help="Skip D1 control-probe steps for control-family runs")
     return parser.parse_args()
 
 

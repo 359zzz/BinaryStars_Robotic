@@ -53,6 +53,15 @@ OPENARM_GRIPPER_HOLD_KP = {"gripper": 8.0}
 OPENARM_GRIPPER_HOLD_KD = {"gripper": 0.2}
 
 
+def _load_controller_params(raw: str | None) -> dict[str, object]:
+    if raw is None:
+        return {}
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError("controller params JSON must decode to an object")
+    return dict(payload)
+
+
 def _openarm_dual_gripper_targets(robot) -> tuple[float, float]:
     left_limits = robot.left_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
     right_limits = robot.right_arm.config.joint_limits.get("gripper", (-65.0, 0.0))
@@ -134,6 +143,7 @@ def make_robot_and_ir(args):
 def run_single(args):
     """Run a single task/controller/config combination."""
     robot, ir, n_per_arm, robot_type = make_robot_and_ir(args)
+    controller_params = _load_controller_params(args.controller_params_json)
 
     obj = TASK_OBJECTS[args.task[0]]
     M_obj = None
@@ -141,7 +151,7 @@ def run_single(args):
         M_obj = make_object_spatial_inertia(obj["mass"], obj["geometry"], obj["dims"])
 
     ctrl = make_controller(
-        args.controller[0], ir, n_per_arm, robot_type, M_obj=M_obj,
+        args.controller[0], ir, n_per_arm, robot_type, M_obj=M_obj, **controller_params,
     )
 
     jn_right = [f"right_joint_{i}" for i in range(1, n_per_arm + 1)]
@@ -175,6 +185,7 @@ def run_single(args):
             fname = out_dir / f"{cc.task_name}_{cc.controller_name}_{cc.config_name}_rep{rep}.json"
             data = {
                 "task": cc.task_name, "controller": cc.controller_name,
+                "controller_params": controller_params,
                 "config": cc.config_name, "rep": rep,
                 "rmse_right": result.rmse_right, "rmse_left": result.rmse_left,
                 "rmse_total": result.rmse_total,
@@ -225,6 +236,7 @@ def _return_to_zero(robot, n_per_arm: int, robot_type: str):
 def run_suite(args):
     """Run the full coordination suite."""
     robot, ir, n_per_arm, robot_type = make_robot_and_ir(args)
+    controller_params = _load_controller_params(args.controller_params_json)
 
     tasks = args.task if args.task else None
     controllers = args.controller if args.controller else None
@@ -246,6 +258,7 @@ def run_suite(args):
             n_reps=args.reps, dry_run=args.dry_run,
             precompensate=args.precompensate,
             precomp_alpha=args.precomp_alpha,
+            controller_params=controller_params,
         )
         logger.info(f"Suite complete: {summary['n_trials']} trials")
     finally:
@@ -268,6 +281,11 @@ def main():
     parser.add_argument("--reps", type=int, default=3)
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--output-dir", default="results/coordination")
+    parser.add_argument(
+        "--controller-params-json",
+        default=None,
+        help="Optional JSON object forwarded to the controller factory.",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate trajectories without hardware")
     parser.add_argument("--all", action="store_true",

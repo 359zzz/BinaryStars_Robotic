@@ -655,6 +655,7 @@ def run_coordination_suite(
     dry_run: bool = False,
     precompensate: bool = False,
     precomp_alpha: float = 0.3,
+    controller_params: dict[str, object] | None = None,
 ) -> dict:
     """Batch execution: tasks x controllers x configs x reps.
 
@@ -666,6 +667,7 @@ def run_coordination_suite(
         controllers = ["decoupled", "j_coupled", "c_coupled", "s_adaptive"]
     if configs is None:
         configs = list(COORDINATION_CONFIGS.keys())
+    controller_params = {} if controller_params is None else dict(controller_params)
 
     if robot_type == "openarm":
         jn_right = [f"right_joint_{i}" for i in range(1, n_per_arm + 1)]
@@ -691,7 +693,7 @@ def run_coordination_suite(
 
         for ctrl_name in controllers:
             ctrl = make_controller(
-                ctrl_name, ir, n_per_arm, robot_type, M_obj=M_obj,
+                ctrl_name, ir, n_per_arm, robot_type, M_obj=M_obj, **controller_params,
             )
 
             for config_name in configs:

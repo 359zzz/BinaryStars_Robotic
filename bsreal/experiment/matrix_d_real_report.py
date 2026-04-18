@@ -47,7 +47,11 @@ def build_matrix_d_real_report(
     coordination_stats = _coordination_stats(coordination_trials)
     task_rankings = _task_rankings(coordination_stats, manifest)
     pairwise_vs_reference = _pairwise_vs_reference(coordination_stats, manifest)
+    pairwise_vs_engineering_anchor = _pairwise_vs_engineering_anchor(
+        coordination_stats, manifest
+    )
     c2_alignment = _c2_alignment(task_rankings, manifest)
+    engineering_anchor_alignment = _engineering_anchor_alignment(task_rankings, manifest)
     trial_validity_gate = _trial_validity_gate(
         candidate_rows=candidate_rows,
         coordination_trials=coordination_trials,
@@ -80,6 +84,7 @@ def build_matrix_d_real_report(
         "source_family_type": manifest.get("source_family_type"),
         "source_matrix_c_readiness": manifest.get("source_matrix_c_readiness"),
         "reference_candidate_id": manifest.get("reference_candidate_id"),
+        "engineering_anchor_candidate_id": manifest.get("engineering_anchor_candidate_id"),
         "annotation": annotation_map,
         "execution_summary": execution_summary,
         "candidate_routes": [
@@ -108,7 +113,9 @@ def build_matrix_d_real_report(
             "primary_metric": "rmse_total",
             "direction": "lower_is_better",
             "pairwise_vs_reference": pairwise_vs_reference,
+            "pairwise_vs_engineering_anchor": pairwise_vs_engineering_anchor,
             "c2_alignment": c2_alignment,
+            "engineering_anchor_alignment": engineering_anchor_alignment,
         },
         "trial_validity_gate": trial_validity_gate,
         "freeze_policy": freeze_policy,
@@ -262,6 +269,7 @@ def _collect_d1_summary(
     ]
     coupling_rows: list[dict[str, Any]] = []
     lemma_rows: list[dict[str, Any]] = []
+    control_probe_rows: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
         candidate_dir = run_path / candidate_id
         for path in sorted(candidate_dir.glob("coupling_*/*.json")):
@@ -286,9 +294,31 @@ def _collect_d1_summary(
                     "timestamp_utc": payload.get("timestamp_utc"),
                 }
             )
+        for path in sorted(candidate_dir.glob("control_probe_pair_*/*.json")):
+            payload = _load_json(path)
+            aggregate = _mapping(payload.get("aggregate", {}))
+            control_probe_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "path": str(path),
+                    "task": payload.get("task"),
+                    "controller": payload.get("controller"),
+                    "probe_pair": payload.get("probe_pair"),
+                    "direction_count": aggregate.get("direction_count"),
+                    "mean_full_body_rmse_deg": aggregate.get("mean_full_body_rmse_deg"),
+                    "mean_opposite_probe_hold_rmse_deg": aggregate.get(
+                        "mean_opposite_probe_hold_rmse_deg"
+                    ),
+                    "max_opposite_probe_peak_abs_error_deg": aggregate.get(
+                        "max_opposite_probe_peak_abs_error_deg"
+                    ),
+                    "timestamp_utc": payload.get("timestamp_utc"),
+                }
+            )
     return {
         "coupling_runs": coupling_rows,
         "lemma3_runs": lemma_rows,
+        "control_probe_runs": control_probe_rows,
     }
 
 
@@ -496,6 +526,33 @@ def _pairwise_vs_reference(
     manifest: Mapping[str, object],
 ) -> list[dict[str, Any]]:
     reference_candidate_id = str(manifest.get("reference_candidate_id"))
+    return _pairwise_vs_candidate(
+        coordination_stats,
+        candidate_id=reference_candidate_id,
+        candidate_label="reference",
+    )
+
+
+def _pairwise_vs_engineering_anchor(
+    coordination_stats: Sequence[Mapping[str, object]],
+    manifest: Mapping[str, object],
+) -> list[dict[str, Any]]:
+    candidate_id = manifest.get("engineering_anchor_candidate_id")
+    if candidate_id is None:
+        return []
+    return _pairwise_vs_candidate(
+        coordination_stats,
+        candidate_id=str(candidate_id),
+        candidate_label="engineering_anchor",
+    )
+
+
+def _pairwise_vs_candidate(
+    coordination_stats: Sequence[Mapping[str, object]],
+    *,
+    candidate_id: str,
+    candidate_label: str,
+) -> list[dict[str, Any]]:
     grouped: dict[str, list[Mapping[str, object]]] = defaultdict(list)
     for row in coordination_stats:
         grouped[str(row.get("task"))].append(row)
@@ -503,7 +560,7 @@ def _pairwise_vs_reference(
     outputs: list[dict[str, Any]] = []
     for task, rows in sorted(grouped.items()):
         reference_row = next(
-            (row for row in rows if str(row.get("candidate_id")) == reference_candidate_id),
+            (row for row in rows if str(row.get("candidate_id")) == candidate_id),
             None,
         )
         if reference_row is None:
@@ -512,8 +569,8 @@ def _pairwise_vs_reference(
         ref_std = _as_float(reference_row.get("rmse_total_std"))
         ref_n = int(reference_row.get("trial_count", 0))
         for row in rows:
-            candidate_id = str(row.get("candidate_id"))
-            if candidate_id == reference_candidate_id:
+            compared_candidate_id = str(row.get("candidate_id"))
+            if compared_candidate_id == candidate_id:
                 continue
             cand_mean = _as_float(row.get("rmse_total_mean"))
             cand_std = _as_float(row.get("rmse_total_std"))
@@ -522,11 +579,11 @@ def _pairwise_vs_reference(
             outputs.append(
                 {
                     "task": task,
-                    "reference_candidate_id": reference_candidate_id,
-                    "candidate_id": candidate_id,
+                    f"{candidate_label}_candidate_id": candidate_id,
+                    "candidate_id": compared_candidate_id,
                     "delta_rmse_total_mean": delta,
-                    "improvement_vs_reference": ref_mean - cand_mean,
-                    "improvement_vs_reference_pct": (
+                    f"improvement_vs_{candidate_label}": ref_mean - cand_mean,
+                    f"improvement_vs_{candidate_label}_pct": (
                         100.0 * (ref_mean - cand_mean) / ref_mean if ref_mean else None
                     ),
                     "cohen_d": _cohen_d(
@@ -546,7 +603,7 @@ def _pairwise_vs_reference(
                         n_b=ref_n,
                     ),
                     "candidate_trial_count": cand_n,
-                    "reference_trial_count": ref_n,
+                    f"{candidate_label}_trial_count": ref_n,
                 }
             )
     return outputs
@@ -607,6 +664,50 @@ def _c2_alignment(
         "expected_primary_candidate_id": primary_ids[0] if primary_ids else None,
         "expected_secondary_candidate_id": secondary_ids[0] if secondary_ids else None,
         "reference_candidate_id": reference_candidate_id,
+    }
+
+
+def _engineering_anchor_alignment(
+    task_rankings: Sequence[Mapping[str, object]],
+    manifest: Mapping[str, object],
+) -> dict[str, Any]:
+    primary_ids = _route_candidate_ids(manifest, "primary_validate")
+    engineering_anchor_id = manifest.get("engineering_anchor_candidate_id")
+    if not primary_ids or engineering_anchor_id is None:
+        return {
+            "status": "not_applicable",
+            "tested_tasks": [],
+            "primary_beats_anchor_tasks": [],
+            "expected_primary_candidate_id": primary_ids[0] if primary_ids else None,
+            "engineering_anchor_candidate_id": engineering_anchor_id,
+        }
+
+    tested_tasks: list[str] = []
+    primary_beats_anchor_tasks: list[str] = []
+    primary_id = primary_ids[0]
+    for ranking in task_rankings:
+        task = str(ranking.get("task"))
+        rows = _sequence_of_mappings(ranking.get("ranking", []))
+        rank_by_id = {str(row.get("candidate_id")): int(row.get("rank", 0)) for row in rows}
+        if primary_id not in rank_by_id or str(engineering_anchor_id) not in rank_by_id:
+            continue
+        tested_tasks.append(task)
+        if rank_by_id[primary_id] < rank_by_id[str(engineering_anchor_id)]:
+            primary_beats_anchor_tasks.append(task)
+
+    if not tested_tasks:
+        status = "not_enough_anchor_tasks"
+    elif tested_tasks == primary_beats_anchor_tasks:
+        status = "primary_beats_engineering_anchor"
+    else:
+        status = "mixed_or_not_supported"
+
+    return {
+        "status": status,
+        "tested_tasks": tested_tasks,
+        "primary_beats_anchor_tasks": primary_beats_anchor_tasks,
+        "expected_primary_candidate_id": primary_id,
+        "engineering_anchor_candidate_id": engineering_anchor_id,
     }
 
 
