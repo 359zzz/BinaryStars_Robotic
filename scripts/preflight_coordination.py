@@ -264,7 +264,7 @@ def main():
     parser.add_argument("--robot", choices=["openarm", "piper"], default="openarm")
     parser.add_argument("--left-port", default="can1")
     parser.add_argument("--right-port", default="can0")
-    parser.add_argument("--config", choices=list(COORDINATION_CONFIGS.keys()), default="bar_mid")
+    parser.add_argument("--config", choices=list(COORDINATION_CONFIGS.keys()), default="bar_b")
     args = parser.parse_args()
 
     try:

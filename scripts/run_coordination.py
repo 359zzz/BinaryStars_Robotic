@@ -9,12 +9,12 @@ Bar-holding protocol:
 Usage:
     # Single trial (no bar, validation)
     python scripts/run_coordination.py --robot openarm \
-        --task independent --controller decoupled --config bar_mid \
+        --task independent --controller decoupled --config bar_b \
         --reps 1 --right-port can1 --left-port can2
 
     # Single trial (with bar)
     python scripts/run_coordination.py --robot openarm \
-        --task bar_only --controller c_coupled --config bar_mid \
+        --task bar_only --controller c_coupled --config bar_b \
         --reps 1 --right-port can1 --left-port can2
 
     # Full suite

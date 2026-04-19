@@ -26,12 +26,14 @@ TASK_OBJECTS = {
 
 _OPENARM_CONFIGS = {
     "bar_mid": {
-        "joint_1": 0.0,
-        "joint_2": 70.0,
+        # Legacy alias kept for compatibility. This now matches the
+        # validated front-lift bar grasp pose used in successful real runs.
+        "joint_1": 30.0,
+        "joint_2": 0.0,
         "joint_3": 0.0,
-        "joint_4": 80.0,
-        "joint_5": 0.0,
-        "joint_6": 0.0,
+        "joint_4": 40.0,
+        "joint_5": 75.0,
+        "joint_6": 25.0,
         "joint_7": 0.0,
     },
     "bar_a": {
