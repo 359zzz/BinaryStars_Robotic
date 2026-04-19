@@ -47,6 +47,10 @@ GRIPPER_HOLD_KD = {"gripper": 0.2}
 GRIPPER_HEAVY_HOLD_KP = {"gripper": 10.0}
 GRIPPER_HEAVY_HOLD_KD = {"gripper": 0.25}
 POST_OBJECT_COOLDOWN_S = 4.0
+WRIST_HOLD_KP = {"joint_5": 18.0}
+WRIST_HOLD_KD = {"joint_5": 0.35}
+WRIST_HEAVY_HOLD_KP = {"joint_5": 22.0}
+WRIST_HEAVY_HOLD_KD = {"joint_5": 0.45}
 
 
 @dataclass
@@ -121,6 +125,86 @@ def _send_action(robot, cmd: dict[str, float], *, custom_kp=None, custom_kd=None
         robot.send_action(cmd, custom_kp=custom_kp, custom_kd=custom_kd)
     else:
         robot.send_action(cmd)
+
+
+def _merge_gain_dicts(*parts: dict[str, float] | None) -> dict[str, float] | None:
+    merged: dict[str, float] = {}
+    for part in parts:
+        if part:
+            merged.update(part)
+    return merged or None
+
+
+def _openarm_object_hold_gains(*, is_heavy_object: bool) -> tuple[dict[str, float], dict[str, float]]:
+    wrist_kp = WRIST_HEAVY_HOLD_KP if is_heavy_object else WRIST_HOLD_KP
+    wrist_kd = WRIST_HEAVY_HOLD_KD if is_heavy_object else WRIST_HOLD_KD
+    gripper_kp = GRIPPER_HEAVY_HOLD_KP if is_heavy_object else GRIPPER_HOLD_KP
+    gripper_kd = GRIPPER_HEAVY_HOLD_KD if is_heavy_object else GRIPPER_HOLD_KD
+    return (
+        _merge_gain_dicts(wrist_kp, gripper_kp) or {},
+        _merge_gain_dicts(wrist_kd, gripper_kd) or {},
+    )
+
+
+def _pose_error_dict(
+    robot,
+    arm_hold_cmd: dict[str, float],
+) -> dict[str, float]:
+    obs = robot.get_observation()
+    errors: dict[str, float] = {}
+    for key, target in arm_hold_cmd.items():
+        current = float(obs.get(key, 0.0))
+        errors[key] = abs(current - float(target))
+    return errors
+
+
+def _stabilize_arm_pose_if_needed(
+    robot,
+    *,
+    arm_hold_cmd: dict[str, float],
+    active_gripper_cmd: dict[str, float],
+    custom_kp: dict[str, float] | None,
+    custom_kd: dict[str, float] | None,
+    max_error_deg: float = 20.0,
+    max_attempts: int = 3,
+) -> None:
+    for attempt_index in range(max_attempts):
+        errors = _pose_error_dict(robot, arm_hold_cmd)
+        worst_key, worst_error = max(errors.items(), key=lambda item: item[1])
+        if worst_error <= max_error_deg:
+            if attempt_index > 0:
+                logger.info(
+                    "Recovered arm pose within %.1f deg after %d correction attempt(s); worst=%s %.1f deg",
+                    max_error_deg,
+                    attempt_index,
+                    worst_key,
+                    worst_error,
+                )
+            return
+        logger.warning(
+            "Arm pose drift before trial start: worst=%s %.1f deg > %.1f deg; correcting (attempt %d/%d)",
+            worst_key,
+            worst_error,
+            max_error_deg,
+            attempt_index + 1,
+            max_attempts,
+        )
+        settle_cmd = dict(arm_hold_cmd)
+        settle_cmd.update(active_gripper_cmd)
+        slow_move(
+            robot,
+            settle_cmd,
+            duration_s=1.2,
+            custom_kp=custom_kp,
+            custom_kd=custom_kd,
+        )
+        time.sleep(0.3)
+
+    errors = _pose_error_dict(robot, arm_hold_cmd)
+    worst_key, worst_error = max(errors.items(), key=lambda item: item[1])
+    raise SafetyError(
+        f"Failed to stabilize start pose before trial: {worst_key} error {worst_error:.1f} deg > {max_error_deg:.1f} deg"
+    )
 
 
 def _send_gripper_repeated(
@@ -435,8 +519,9 @@ def run_coordination_trial(
     gripper_open_latch_kp = GRIPPER_OPEN_LATCH_KP if controller.robot_type == "openarm" else None
     gripper_open_latch_kd = GRIPPER_OPEN_LATCH_KD if controller.robot_type == "openarm" else None
     if controller.robot_type == "openarm":
-        gripper_hold_kp = GRIPPER_HEAVY_HOLD_KP if is_heavy_object else GRIPPER_HOLD_KP
-        gripper_hold_kd = GRIPPER_HEAVY_HOLD_KD if is_heavy_object else GRIPPER_HOLD_KD
+        gripper_hold_kp, gripper_hold_kd = _openarm_object_hold_gains(
+            is_heavy_object=is_heavy_object
+        )
         gripper_close_stages = (
             GRIPPER_CLOSE_LATCH_STAGES_HEAVY if is_heavy_object else GRIPPER_CLOSE_LATCH_STAGES_LIGHT
         )
@@ -488,6 +573,13 @@ def run_coordination_trial(
                 custom_kd=gripper_hold_kd,
             )
             time.sleep(0.3)
+            _stabilize_arm_pose_if_needed(
+                robot,
+                arm_hold_cmd=arm_hold_cmd,
+                active_gripper_cmd=active_gripper_cmd,
+                custom_kp=gripper_hold_kp,
+                custom_kd=gripper_hold_kd,
+            )
         else:
             active_gripper_cmd = _send_gripper_repeated(
                 robot,
@@ -503,6 +595,15 @@ def run_coordination_trial(
         f"Trial: {coord_config.task_name}/{coord_config.controller_name}/"
         f"{coord_config.config_name} rep={rep}"
     )
+
+    if has_object and controller.robot_type == "openarm":
+        _stabilize_arm_pose_if_needed(
+            robot,
+            arm_hold_cmd=arm_hold_cmd,
+            active_gripper_cmd=active_gripper_cmd,
+            custom_kp=gripper_hold_kp,
+            custom_kd=gripper_hold_kd,
+        )
 
     t0 = time.monotonic()
     step = 0

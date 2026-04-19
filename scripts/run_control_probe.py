@@ -23,10 +23,6 @@ from bsreal.experiment.controllers import make_controller
 from bsreal.experiment.coordination import (
     GRIPPER_CLOSE_LATCH_STAGES_HEAVY,
     GRIPPER_CLOSE_LATCH_STAGES_LIGHT,
-    GRIPPER_HEAVY_HOLD_KD,
-    GRIPPER_HEAVY_HOLD_KP,
-    GRIPPER_HOLD_KD,
-    GRIPPER_HOLD_KP,
     GRIPPER_OPEN_LATCH_KD,
     GRIPPER_OPEN_LATCH_KP,
     HEAVY_OBJECT_MASS_KG,
@@ -35,7 +31,9 @@ from bsreal.experiment.coordination import (
     _current_dual_gripper_cmd,
     _gripper_targets,
     _hold_gripper_target_until_enter,
+    _openarm_object_hold_gains,
     _send_gripper_repeated,
+    _stabilize_arm_pose_if_needed,
 )
 from bsreal.experiment.perturbation import _get_observation_with_retry, _send_action_with_retry
 from bsreal.experiment.safety import SafetyError, check_position_error, emergency_freeze, slow_move
@@ -130,8 +128,7 @@ def _prepare_object_if_needed(
         return False, active_gripper_cmd, (gripper_open, gripper_close)
 
     is_heavy_object = object_mass_kg >= HEAVY_OBJECT_MASS_KG
-    hold_kp = GRIPPER_HEAVY_HOLD_KP if is_heavy_object else GRIPPER_HOLD_KP
-    hold_kd = GRIPPER_HEAVY_HOLD_KD if is_heavy_object else GRIPPER_HOLD_KD
+    hold_kp, hold_kd = _openarm_object_hold_gains(is_heavy_object=is_heavy_object)
     close_stages = (
         GRIPPER_CLOSE_LATCH_STAGES_HEAVY if is_heavy_object else GRIPPER_CLOSE_LATCH_STAGES_LIGHT
     )
@@ -177,6 +174,13 @@ def _prepare_object_if_needed(
         custom_kd=hold_kd,
     )
     time.sleep(0.3)
+    _stabilize_arm_pose_if_needed(
+        robot,
+        arm_hold_cmd=arm_hold_cmd,
+        active_gripper_cmd=active_gripper_cmd,
+        custom_kp=hold_kp,
+        custom_kd=hold_kd,
+    )
     return True, active_gripper_cmd, (gripper_open, gripper_close)
 
 
@@ -194,8 +198,7 @@ def _release_object_if_needed(
 
     gripper_open, gripper_close = gripper_targets
     is_heavy_object = object_mass_kg >= HEAVY_OBJECT_MASS_KG
-    hold_kp = GRIPPER_HEAVY_HOLD_KP if is_heavy_object else GRIPPER_HOLD_KP
-    hold_kd = GRIPPER_HEAVY_HOLD_KD if is_heavy_object else GRIPPER_HOLD_KD
+    hold_kp, hold_kd = _openarm_object_hold_gains(is_heavy_object=is_heavy_object)
 
     _hold_gripper_target_until_enter(
         robot,
@@ -301,8 +304,7 @@ def _run_directional_probe(
     input_offsets_deg: list[float] = []
 
     is_heavy_object = object_mass_kg >= HEAVY_OBJECT_MASS_KG
-    hold_kp = GRIPPER_HEAVY_HOLD_KP if is_heavy_object else GRIPPER_HOLD_KP
-    hold_kd = GRIPPER_HEAVY_HOLD_KD if is_heavy_object else GRIPPER_HOLD_KD
+    hold_kp, hold_kd = _openarm_object_hold_gains(is_heavy_object=is_heavy_object)
     custom_kp = hold_kp if has_object else None
     custom_kd = hold_kd if has_object else None
     qdot_target = np.zeros_like(base_target_deg)
@@ -551,6 +553,14 @@ def main() -> int:
                 object_mass_kg=float(obj["mass"]),
                 arm_hold_cmd=arm_hold_cmd,
             )
+            if has_object:
+                _stabilize_arm_pose_if_needed(
+                    robot,
+                    arm_hold_cmd=arm_hold_cmd,
+                    active_gripper_cmd=active_gripper_cmd,
+                    custom_kp=custom_kp,
+                    custom_kd=custom_kd,
+                )
             directions = [
                 _run_directional_probe(
                     robot,
