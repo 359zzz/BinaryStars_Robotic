@@ -275,6 +275,8 @@ def candidate_validation_steps(
                 "scripts/preflight_coordination.py",
                 "--robot",
                 args.robot,
+                "--config",
+                args.coordination_config,
                 "--left-port",
                 args.left_port,
                 "--right-port",
@@ -423,6 +425,8 @@ def control_candidate_validation_steps(
                 "scripts/preflight_coordination.py",
                 "--robot",
                 args.robot,
+                "--config",
+                args.coordination_config,
                 "--left-port",
                 args.left_port,
                 "--right-port",
@@ -801,7 +805,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-optional-candidates", action="store_true", help="Also schedule optional_validate candidates for real-robot execution")
     parser.add_argument("--include-coordination", action=argparse.BooleanOptionalAction, default=True, help="Include downstream coordination tasks in D2")
     parser.add_argument("--coordination-controller", default="c_coupled", choices=["decoupled", "j_coupled", "c_coupled", "s_adaptive"])
-    parser.add_argument("--coordination-config", default="bar_b", choices=["bar_a", "bar_b", "bar_c"])
+    parser.add_argument("--coordination-config", default="bar_b", choices=["bar_mid", "bar_a", "bar_b", "bar_c"])
     parser.add_argument("--coordination-tasks", nargs="+", default=["bar_only", "bar_loaded"], choices=["independent", "bar_only", "bar_loaded"])
     parser.add_argument("--coordination-reps", type=int, default=3)
     parser.add_argument("--coordination-duration", type=float, default=10.0)

@@ -78,7 +78,7 @@ def _park_openarm_dual_grippers_closed(robot):
     _send_dual_gripper_repeated(robot, gripper_close, duration_s=0.8, soft_hold=False)
 
 
-def preflight_openarm_dual(left_port: str, right_port: str):
+def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str):
     from lerobot.robots.bi_openarm_follower import (
         BiOpenArmFollower, BiOpenArmFollowerConfig,
     )
@@ -191,8 +191,8 @@ def preflight_openarm_dual(left_port: str, right_port: str):
         print(f"  WARNING: sync error = {sync_error:.2f} deg")
 
     # Step 6: Trajectory preview
-    print("[6/6] Trajectory preview (bar_a config)...")
-    start_pos = get_start_positions_deg("bar_a")
+    print(f"[6/6] Trajectory preview ({preview_config} config)...")
+    start_pos = get_start_positions_deg(preview_config)
     print(f"  Start positions: { {k: f'{v:.1f}' for k, v in list(start_pos.items())[:4]} } ...")
     print("  OK: trajectory module loaded")
 
@@ -264,11 +264,12 @@ def main():
     parser.add_argument("--robot", choices=["openarm", "piper"], default="openarm")
     parser.add_argument("--left-port", default="can1")
     parser.add_argument("--right-port", default="can0")
+    parser.add_argument("--config", choices=list(COORDINATION_CONFIGS.keys()), default="bar_mid")
     args = parser.parse_args()
 
     try:
         if args.robot == "openarm":
-            preflight_openarm_dual(args.left_port, args.right_port)
+            preflight_openarm_dual(args.left_port, args.right_port, args.config)
         else:
             preflight_piper_dual(args.left_port, args.right_port)
     except Exception as e:
