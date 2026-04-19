@@ -539,6 +539,10 @@ def main() -> int:
         M_obj = None
         if obj["mass"] > 0.0:
             M_obj = make_object_spatial_inertia(obj["mass"], obj["geometry"], obj["dims"])
+        is_heavy_object = float(obj["mass"]) >= HEAVY_OBJECT_MASS_KG
+        object_hold_kp, object_hold_kd = _openarm_object_hold_gains(
+            is_heavy_object=is_heavy_object
+        )
 
         robot.connect()
         active_gripper_cmd: dict[str, float] = {}
@@ -560,8 +564,8 @@ def main() -> int:
                     robot,
                     arm_hold_cmd=arm_hold_cmd,
                     active_gripper_cmd=active_gripper_cmd,
-                    custom_kp=custom_kp,
-                    custom_kd=custom_kd,
+                    custom_kp=object_hold_kp,
+                    custom_kd=object_hold_kd,
                 )
             directions = [
                 _run_directional_probe(
