@@ -23,6 +23,8 @@ from bsreal.experiment.controllers import make_controller
 from bsreal.experiment.coordination import (
     GRIPPER_CLOSE_LATCH_STAGES_HEAVY,
     GRIPPER_CLOSE_LATCH_STAGES_LIGHT,
+    GRIPPER_HOLD_KD,
+    GRIPPER_HOLD_KP,
     GRIPPER_OPEN_LATCH_KD,
     GRIPPER_OPEN_LATCH_KP,
     HEAVY_OBJECT_MASS_KG,
