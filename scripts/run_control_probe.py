@@ -121,6 +121,7 @@ def _prepare_object_if_needed(
     robot,
     *,
     object_mass_kg: float,
+    arm_hold_cmd: dict[str, float],
 ) -> tuple[bool, dict[str, float], tuple[float, float]]:
     has_object = object_mass_kg > 0.0
     gripper_open, gripper_close = _gripper_targets(robot, "openarm")
@@ -141,6 +142,7 @@ def _prepare_object_if_needed(
         duration_s=0.5,
         custom_kp=GRIPPER_OPEN_LATCH_KP,
         custom_kd=GRIPPER_OPEN_LATCH_KD,
+        arm_hold_cmd=arm_hold_cmd,
     )
     _hold_gripper_target_until_enter(
         robot,
@@ -151,6 +153,7 @@ def _prepare_object_if_needed(
         ),
         custom_kp=hold_kp,
         custom_kd=hold_kd,
+        arm_hold_cmd=arm_hold_cmd,
     )
     print("  Grippers closing...")
     active_gripper_cmd = _close_grippers_with_escalation(
@@ -162,7 +165,18 @@ def _prepare_object_if_needed(
         open_latch_kd=GRIPPER_OPEN_LATCH_KD,
         hold_kp=hold_kp,
         hold_kd=hold_kd,
+        arm_hold_cmd=arm_hold_cmd,
     )
+    settled_cmd = dict(arm_hold_cmd)
+    settled_cmd.update(active_gripper_cmd)
+    slow_move(
+        robot,
+        settled_cmd,
+        duration_s=1.0,
+        custom_kp=hold_kp,
+        custom_kd=hold_kd,
+    )
+    time.sleep(0.3)
     return True, active_gripper_cmd, (gripper_open, gripper_close)
 
 
@@ -173,6 +187,7 @@ def _release_object_if_needed(
     object_mass_kg: float,
     active_gripper_cmd: dict[str, float],
     gripper_targets: tuple[float, float],
+    arm_hold_cmd: dict[str, float],
 ) -> dict[str, float]:
     if not has_object:
         return active_gripper_cmd
@@ -188,6 +203,7 @@ def _release_object_if_needed(
         "\n>>> Support the bar, then press ENTER to release the grippers...",
         custom_kp=hold_kp,
         custom_kd=hold_kd,
+        arm_hold_cmd=arm_hold_cmd,
     )
     _send_gripper_repeated(
         robot,
@@ -195,6 +211,7 @@ def _release_object_if_needed(
         duration_s=0.8,
         custom_kp=GRIPPER_OPEN_LATCH_KP,
         custom_kd=GRIPPER_OPEN_LATCH_KD,
+        arm_hold_cmd=arm_hold_cmd,
     )
     time.sleep(0.3)
     _hold_gripper_target_until_enter(
@@ -203,6 +220,7 @@ def _release_object_if_needed(
         "\n>>> Remove the bar completely, then press ENTER to park the empty grippers closed...",
         custom_kp=hold_kp,
         custom_kd=hold_kd,
+        arm_hold_cmd=arm_hold_cmd,
     )
     active_gripper_cmd = _send_gripper_repeated(
         robot,
@@ -210,6 +228,7 @@ def _release_object_if_needed(
         duration_s=0.8,
         custom_kp=None,
         custom_kd=None,
+        arm_hold_cmd=arm_hold_cmd,
     )
     logger.info("Cooling grippers for %.1fs before finishing.", POST_OBJECT_COOLDOWN_S)
     time.sleep(POST_OBJECT_COOLDOWN_S)
@@ -479,6 +498,10 @@ def main() -> int:
     ir = make_openarm_dual_arm_ir()
     _, _, all_joint_names = _joint_name_lists(n_per_arm)
     base_target_deg = _base_target_deg(args.config, all_joint_names)
+    arm_hold_cmd = {
+        f"{joint_name}.pos": float(base_target_deg[index])
+        for index, joint_name in enumerate(all_joint_names)
+    }
 
     directions: list[dict[str, object]]
     robot = _make_robot(args)
@@ -526,6 +549,7 @@ def main() -> int:
             has_object, active_gripper_cmd, gripper_targets = _prepare_object_if_needed(
                 robot,
                 object_mass_kg=float(obj["mass"]),
+                arm_hold_cmd=arm_hold_cmd,
             )
             directions = [
                 _run_directional_probe(
@@ -585,6 +609,7 @@ def main() -> int:
                     object_mass_kg=float(TASK_OBJECTS[args.task]["mass"]),
                     active_gripper_cmd=active_gripper_cmd,
                     gripper_targets=gripper_targets,
+                    arm_hold_cmd=arm_hold_cmd,
                 )
                 final_cmd = {
                     f"{joint_name}.pos": float(base_target_deg[index])

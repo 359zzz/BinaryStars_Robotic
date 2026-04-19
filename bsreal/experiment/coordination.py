@@ -131,14 +131,17 @@ def _send_gripper_repeated(
     dt: float = 0.05,
     custom_kp=None,
     custom_kd=None,
+    arm_hold_cmd: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Send a dual-gripper command repeatedly so the hold state latches."""
     cmd = _dual_gripper_cmd(target)
+    send_cmd = dict(arm_hold_cmd or {})
+    send_cmd.update(cmd)
     n_steps = max(int(duration_s / dt), 1)
     for _ in range(n_steps):
-        _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+        _send_action(robot, send_cmd, custom_kp=custom_kp, custom_kd=custom_kd)
         time.sleep(dt)
-    _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+    _send_action(robot, send_cmd, custom_kp=custom_kp, custom_kd=custom_kd)
     return cmd
 
 
@@ -200,6 +203,7 @@ def _close_grippers_with_escalation(
     open_latch_kd=None,
     hold_kp=None,
     hold_kd=None,
+    arm_hold_cmd: dict[str, float] | None = None,
 ) -> dict[str, float]:
     for attempt_index in range(2):
         for stage_index, (stage_kp, stage_kd, duration_s) in enumerate(close_stages, start=1):
@@ -209,6 +213,7 @@ def _close_grippers_with_escalation(
                 duration_s=duration_s,
                 custom_kp=stage_kp,
                 custom_kd=stage_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
             if _gripper_close_motion_sufficient(
                 robot,
@@ -226,6 +231,7 @@ def _close_grippers_with_escalation(
                     duration_s=0.8,
                     custom_kp=hold_kp,
                     custom_kd=hold_kd,
+                    arm_hold_cmd=arm_hold_cmd,
                 )
             logger.warning(
                 "Gripper close attempt %d stage %d did not produce enough motion; escalating.",
@@ -241,6 +247,7 @@ def _close_grippers_with_escalation(
                 duration_s=0.5,
                 custom_kp=open_latch_kp,
                 custom_kd=open_latch_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
             _hold_gripper_target_until_enter(
                 robot,
@@ -248,6 +255,7 @@ def _close_grippers_with_escalation(
                 "\n>>> Grippers still did not close enough. Re-seat the bar and press ENTER to retry close...",
                 custom_kp=hold_kp,
                 custom_kd=hold_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
             continue
 
@@ -265,14 +273,17 @@ def _hold_gripper_target_until_enter(
     dt: float = 0.05,
     custom_kp=None,
     custom_kd=None,
+    arm_hold_cmd: dict[str, float] | None = None,
 ) -> dict[str, float]:
     """Keep sending the same dual-gripper target while waiting for manual input."""
     cmd = _dual_gripper_cmd(target)
+    send_cmd = dict(arm_hold_cmd or {})
+    send_cmd.update(cmd)
     stop_event = threading.Event()
 
     def _worker():
         while not stop_event.is_set():
-            _send_action(robot, cmd, custom_kp=custom_kp, custom_kd=custom_kd)
+            _send_action(robot, send_cmd, custom_kp=custom_kp, custom_kd=custom_kd)
             if stop_event.wait(dt):
                 break
 
@@ -401,7 +412,8 @@ def run_coordination_trial(
     # 1. Slow move to start. Keep grippers at their current command during
     # repositioning so gripper motors do not drop out of the command stream.
     start_pos = get_start_positions_deg(coord_config.config_name)
-    start_cmd = {f"{jn}.pos": start_pos.get(jn, 0.0) for jn in all_joint_names}
+    arm_hold_cmd = {f"{jn}.pos": start_pos.get(jn, 0.0) for jn in all_joint_names}
+    start_cmd = dict(arm_hold_cmd)
     start_cmd.update(_current_dual_gripper_cmd(robot))
     if controller.robot_type == "openarm":
         slow_move(
@@ -439,6 +451,7 @@ def run_coordination_trial(
             duration_s=0.5,
             custom_kp=gripper_open_latch_kp,
             custom_kd=gripper_open_latch_kd,
+            arm_hold_cmd=arm_hold_cmd,
         )
         _hold_gripper_target_until_enter(
             robot,
@@ -450,6 +463,7 @@ def run_coordination_trial(
             ),
             custom_kp=gripper_hold_kp,
             custom_kd=gripper_hold_kd,
+            arm_hold_cmd=arm_hold_cmd,
         )
         print("  Grippers closing...")
         if controller.robot_type == "openarm":
@@ -462,7 +476,18 @@ def run_coordination_trial(
                 open_latch_kd=gripper_open_latch_kd,
                 hold_kp=gripper_hold_kp,
                 hold_kd=gripper_hold_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
+            settled_cmd = dict(arm_hold_cmd)
+            settled_cmd.update(active_gripper_cmd)
+            slow_move(
+                robot,
+                settled_cmd,
+                duration_s=1.0,
+                custom_kp=gripper_hold_kp,
+                custom_kd=gripper_hold_kd,
+            )
+            time.sleep(0.3)
         else:
             active_gripper_cmd = _send_gripper_repeated(
                 robot,
@@ -470,6 +495,7 @@ def run_coordination_trial(
                 duration_s=0.6,
                 custom_kp=gripper_hold_kp,
                 custom_kd=gripper_hold_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
 
     # 3. Control loop
@@ -570,6 +596,7 @@ def run_coordination_trial(
                 "\n>>> Support the bar, then press ENTER to release the grippers...",
                 custom_kp=gripper_hold_kp,
                 custom_kd=gripper_hold_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
             _send_gripper_repeated(
                 robot,
@@ -577,6 +604,7 @@ def run_coordination_trial(
                 duration_s=0.8,
                 custom_kp=gripper_open_latch_kp,
                 custom_kd=gripper_open_latch_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
             time.sleep(0.3)
             _hold_gripper_target_until_enter(
@@ -585,6 +613,7 @@ def run_coordination_trial(
                 "\n>>> Remove the bar completely, then press ENTER to park the empty grippers closed...",
                 custom_kp=gripper_hold_kp,
                 custom_kd=gripper_hold_kd,
+                arm_hold_cmd=arm_hold_cmd,
             )
             if controller.robot_type == "openarm":
                 active_gripper_cmd = _send_gripper_repeated(
@@ -593,6 +622,7 @@ def run_coordination_trial(
                     duration_s=0.8,
                     custom_kp=None,
                     custom_kd=None,
+                    arm_hold_cmd=arm_hold_cmd,
                 )
             else:
                 active_gripper_cmd = _send_gripper_repeated(
@@ -601,6 +631,7 @@ def run_coordination_trial(
                     duration_s=0.6,
                     custom_kp=gripper_hold_kp,
                     custom_kd=gripper_hold_kd,
+                    arm_hold_cmd=arm_hold_cmd,
                 )
             logger.info("Cooling grippers for %.1fs before the next trial.", POST_OBJECT_COOLDOWN_S)
             time.sleep(POST_OBJECT_COOLDOWN_S)
