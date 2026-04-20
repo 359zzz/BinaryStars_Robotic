@@ -191,6 +191,10 @@ def run_single(args):
                 "rmse_total": result.rmse_total,
                 "s_rho_l": result.s_rho_l, "j_cross_max": result.j_cross_max,
                 "n_samples": result.n_samples,
+                "contact_settled_passive_joint_targets": result.contact_settled_passive_joint_targets,
+                "contact_settled_passive_joint_nominal_targets": result.contact_settled_passive_joint_nominal_targets,
+                "contact_settled_passive_joint_errors_deg": result.contact_settled_passive_joint_errors_deg,
+                "pretrial_pose_stabilization_events": result.pretrial_pose_stabilization_events,
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             }
             with open(fname, "w") as f:

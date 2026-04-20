@@ -6,6 +6,7 @@ safety limits, small synchronized motion.
 """
 
 import argparse
+import json
 import math
 import sys
 import time
@@ -78,7 +79,23 @@ def _park_openarm_dual_grippers_closed(robot):
     _send_dual_gripper_repeated(robot, gripper_close, duration_s=0.8, soft_hold=False)
 
 
-def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str):
+def _write_summary(path: str | None, payload: dict[str, object]) -> None:
+    if not path:
+        return
+    summary_path = Path(path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def preflight_openarm_dual(
+    left_port: str,
+    right_port: str,
+    preview_config: str,
+    *,
+    summary_output: str | None = None,
+    sync_error_threshold_deg: float = 1.0,
+    require_sync_ok: bool = False,
+):
     from lerobot.robots.bi_openarm_follower import (
         BiOpenArmFollower, BiOpenArmFollowerConfig,
     )
@@ -92,6 +109,16 @@ def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str)
         id="preflight_coordination",
     )
     robot = BiOpenArmFollower(config)
+    summary: dict[str, object] = {
+        "schema": "coordination_preflight_summary_v1",
+        "robot": "openarm",
+        "left_port": left_port,
+        "right_port": right_port,
+        "config": preview_config,
+        "status": "running",
+        "sync_error_threshold_deg": float(sync_error_threshold_deg),
+        "require_sync_ok": bool(require_sync_ok),
+    }
 
     right_joints = [f"right_joint_{i}" for i in range(1, 8)]
     left_joints = [f"left_joint_{i}" for i in range(1, 8)]
@@ -101,6 +128,7 @@ def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str)
     print("[1/6] Connecting dual-arm OpenArm...")
     robot.connect()
     print("  OK: connected")
+    summary["connected"] = True
 
     # Step 2: Read all 14 joints
     print("[2/6] Reading 14 joint states...")
@@ -116,6 +144,7 @@ def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str)
         print(f"  WARNING: missing feedback for {missing}")
     else:
         print("  OK: all 14 joints reporting")
+    summary["missing_joint_feedback"] = missing
 
     # Step 3: Gripper test
     print("[3/6] Gripper test (close then open)...")
@@ -138,6 +167,10 @@ def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str)
         print("  OK: both grippers responding")
     else:
         print("  WARNING: gripper response may be weak")
+    summary["gripper_response"] = {
+        "closed": {"right": rg, "left": lg},
+        "open": {"right": rg2, "left": lg2},
+    }
 
     _send_dual_gripper_pair_repeated(robot, initial_rg, initial_lg, duration_s=0.5, soft_hold=True)
 
@@ -185,20 +218,36 @@ def preflight_openarm_dual(left_port: str, right_port: str, preview_config: str)
     time.sleep(0.5)
 
     sync_error = abs(dr - dl)
-    if sync_error < 1.0 and abs(dr) > 0.5:
+    sync_ok = sync_error < float(sync_error_threshold_deg) and abs(dr) > 0.5
+    if sync_ok:
         print(f"  OK: synchronized (sync error = {sync_error:.2f} deg)")
     else:
         print(f"  WARNING: sync error = {sync_error:.2f} deg")
+    summary["sync_check"] = {
+        "right_delta_deg": dr,
+        "left_delta_deg": dl,
+        "sync_error_deg": sync_error,
+        "sync_ok": sync_ok,
+    }
 
     # Step 6: Trajectory preview
     print(f"[6/6] Trajectory preview ({preview_config} config)...")
     start_pos = get_start_positions_deg(preview_config)
     print(f"  Start positions: { {k: f'{v:.1f}' for k, v in list(start_pos.items())[:4]} } ...")
     print("  OK: trajectory module loaded")
+    summary["trajectory_preview_loaded"] = True
 
     print("\n[6/6] Parking grippers closed, then disconnecting...")
     _park_openarm_dual_grippers_closed(robot)
     robot.disconnect()
+    if require_sync_ok and not sync_ok:
+        summary["status"] = "failed_sync_gate"
+        _write_summary(summary_output, summary)
+        raise RuntimeError(
+            f"sync gate failed: {sync_error:.2f} deg > {float(sync_error_threshold_deg):.2f} deg"
+        )
+    summary["status"] = "passed"
+    _write_summary(summary_output, summary)
     print("  OK: pre-flight PASSED")
 
 
@@ -265,14 +314,39 @@ def main():
     parser.add_argument("--left-port", default="can1")
     parser.add_argument("--right-port", default="can0")
     parser.add_argument("--config", choices=list(COORDINATION_CONFIGS.keys()), default="bar_b")
+    parser.add_argument("--summary-output", default=None)
+    parser.add_argument("--sync-error-threshold-deg", type=float, default=1.0)
+    parser.add_argument("--require-sync-ok", action=argparse.BooleanOptionalAction, default=False)
     args = parser.parse_args()
 
     try:
         if args.robot == "openarm":
-            preflight_openarm_dual(args.left_port, args.right_port, args.config)
+            preflight_openarm_dual(
+                args.left_port,
+                args.right_port,
+                args.config,
+                summary_output=args.summary_output,
+                sync_error_threshold_deg=float(args.sync_error_threshold_deg),
+                require_sync_ok=bool(args.require_sync_ok),
+            )
         else:
             preflight_piper_dual(args.left_port, args.right_port)
     except Exception as e:
+        if args.summary_output:
+            _write_summary(
+                args.summary_output,
+                {
+                    "schema": "coordination_preflight_summary_v1",
+                    "robot": args.robot,
+                    "left_port": args.left_port,
+                    "right_port": args.right_port,
+                    "config": args.config,
+                    "status": "failed_exception",
+                    "failure_message": str(e),
+                    "sync_error_threshold_deg": float(args.sync_error_threshold_deg),
+                    "require_sync_ok": bool(args.require_sync_ok),
+                },
+            )
         print(f"\nPRE-FLIGHT FAILED: {e}")
         import traceback
         traceback.print_exc()

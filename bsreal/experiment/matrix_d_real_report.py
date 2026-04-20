@@ -38,7 +38,7 @@ def build_matrix_d_real_report(
         else _mapping(manifest.get("execution_policy", {})).get("coordination_reps", 0)
     )
 
-    d1_summary = _collect_d1_summary(run_path, candidate_rows)
+    d1_summary = _collect_d1_summary(run_path, candidate_rows, manifest=manifest)
     coordination_trials = _collect_coordination_trials(
         run_path,
         candidate_rows=candidate_rows,
@@ -72,6 +72,7 @@ def build_matrix_d_real_report(
         trial_validity_gate=trial_validity_gate,
         manifest=manifest,
     )
+    engineering_adjustments = _engineering_adjustment_summary(coordination_trials)
 
     return {
         "schema": "matrix_d_real_report_v1",
@@ -116,9 +117,11 @@ def build_matrix_d_real_report(
             "pairwise_vs_engineering_anchor": pairwise_vs_engineering_anchor,
             "c2_alignment": c2_alignment,
             "engineering_anchor_alignment": engineering_anchor_alignment,
+            "d1_probe_alignment": _mapping(d1_summary.get("probe_alignment", {})),
         },
         "trial_validity_gate": trial_validity_gate,
         "freeze_policy": freeze_policy,
+        "engineering_adjustments": engineering_adjustments,
         "paper_ready_metrics": paper_ready_metrics,
         "notes": [
             "Matrix D report summarizes downstream real-robot evidence only.",
@@ -261,6 +264,8 @@ def _execution_summary(execution: Mapping[str, object]) -> dict[str, Any]:
 def _collect_d1_summary(
     run_path: Path,
     candidate_rows: Sequence[Mapping[str, object]],
+    *,
+    manifest: Mapping[str, object],
 ) -> dict[str, Any]:
     candidate_ids = [
         str(row.get("candidate_id"))
@@ -270,8 +275,21 @@ def _collect_d1_summary(
     coupling_rows: list[dict[str, Any]] = []
     lemma_rows: list[dict[str, Any]] = []
     control_probe_rows: list[dict[str, Any]] = []
+    preflight_rows: list[dict[str, Any]] = []
     for candidate_id in candidate_ids:
         candidate_dir = run_path / candidate_id
+        for path in sorted(candidate_dir.glob("preflight/*.json")):
+            payload = _load_json(path)
+            preflight_rows.append(
+                {
+                    "candidate_id": candidate_id,
+                    "path": str(path),
+                    "status": payload.get("status"),
+                    "sync_error_deg": _as_float(_mapping(payload.get("sync_check", {})).get("sync_error_deg")),
+                    "sync_ok": bool(_mapping(payload.get("sync_check", {})).get("sync_ok")),
+                    "require_sync_ok": bool(payload.get("require_sync_ok", False)),
+                }
+            )
         for path in sorted(candidate_dir.glob("coupling_*/*.json")):
             payload = _load_json(path)
             coupling_rows.append(
@@ -304,6 +322,7 @@ def _collect_d1_summary(
                     "task": payload.get("task"),
                     "controller": payload.get("controller"),
                     "probe_pair": payload.get("probe_pair"),
+                    "context_id": _context_id_from_payload(payload),
                     "direction_count": aggregate.get("direction_count"),
                     "mean_full_body_rmse_deg": aggregate.get("mean_full_body_rmse_deg"),
                     "mean_opposite_probe_hold_rmse_deg": aggregate.get(
@@ -315,10 +334,203 @@ def _collect_d1_summary(
                     "timestamp_utc": payload.get("timestamp_utc"),
                 }
             )
+    control_probe_candidate_stats = _control_probe_candidate_stats(control_probe_rows)
+    probe_pairwise_vs_reference = _control_probe_pairwise(
+        control_probe_candidate_stats,
+        candidate_id=str(manifest.get("reference_candidate_id")),
+        candidate_label="reference",
+    )
+    probe_pairwise_vs_anchor = _control_probe_pairwise(
+        control_probe_candidate_stats,
+        candidate_id=(
+            str(manifest.get("engineering_anchor_candidate_id"))
+            if manifest.get("engineering_anchor_candidate_id") is not None
+            else None
+        ),
+        candidate_label="engineering_anchor",
+    )
     return {
+        "preflight_runs": preflight_rows,
         "coupling_runs": coupling_rows,
         "lemma3_runs": lemma_rows,
         "control_probe_runs": control_probe_rows,
+        "control_probe_candidate_stats": control_probe_candidate_stats,
+        "control_probe_pairwise_vs_reference": probe_pairwise_vs_reference,
+        "control_probe_pairwise_vs_engineering_anchor": probe_pairwise_vs_anchor,
+        "probe_alignment": _probe_alignment(
+            probe_pairwise_vs_reference,
+            probe_pairwise_vs_anchor,
+            reference_candidate_id=str(manifest.get("reference_candidate_id")),
+            primary_candidate_id=_primary_candidate_from_manifest(manifest),
+        ),
+    }
+
+
+def _control_probe_candidate_stats(
+    control_probe_rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, tuple[int, int]], list[Mapping[str, object]]] = defaultdict(list)
+    for row in control_probe_rows:
+        probe_pair = row.get("probe_pair")
+        if not isinstance(probe_pair, Sequence) or isinstance(probe_pair, (str, bytes)) or len(probe_pair) != 2:
+            continue
+        key = (
+            str(row.get("candidate_id")),
+            str(row.get("task")),
+            (int(probe_pair[0]), int(probe_pair[1])),
+        )
+        grouped[key].append(row)
+
+    stats = []
+    for (candidate_id, task, probe_pair), rows in sorted(grouped.items()):
+        hold_rmse = [_as_float(row.get("mean_opposite_probe_hold_rmse_deg")) for row in rows]
+        peak_error = [_as_float(row.get("max_opposite_probe_peak_abs_error_deg")) for row in rows]
+        full_rmse = [_as_float(row.get("mean_full_body_rmse_deg")) for row in rows]
+        stats.append(
+            {
+                "candidate_id": candidate_id,
+                "task": task,
+                "probe_pair": [probe_pair[0], probe_pair[1]],
+                "trial_count": len(rows),
+                "hold_rmse_mean_deg": _mean(hold_rmse),
+                "hold_rmse_std_deg": _std(hold_rmse),
+                "peak_error_mean_deg": _mean(peak_error),
+                "full_body_rmse_mean_deg": _mean(full_rmse),
+            }
+        )
+    return stats
+
+
+def _control_probe_pairwise(
+    control_probe_candidate_stats: Sequence[Mapping[str, object]],
+    *,
+    candidate_id: str | None,
+    candidate_label: str,
+) -> list[dict[str, Any]]:
+    if candidate_id is None:
+        return []
+    grouped: dict[tuple[str, tuple[int, int]], list[Mapping[str, object]]] = defaultdict(list)
+    for row in control_probe_candidate_stats:
+        probe_pair = row.get("probe_pair")
+        if not isinstance(probe_pair, Sequence) or isinstance(probe_pair, (str, bytes)) or len(probe_pair) != 2:
+            continue
+        grouped[(str(row.get("task")), (int(probe_pair[0]), int(probe_pair[1])) )].append(row)
+
+    outputs: list[dict[str, Any]] = []
+    for (task, probe_pair), rows in sorted(grouped.items()):
+        comparator = next(
+            (row for row in rows if str(row.get("candidate_id")) == candidate_id),
+            None,
+        )
+        if comparator is None:
+            continue
+        ref_hold_rmse = _as_float(comparator.get("hold_rmse_mean_deg"))
+        ref_peak_error = _as_float(comparator.get("peak_error_mean_deg"))
+        for row in rows:
+            compared_candidate_id = str(row.get("candidate_id"))
+            if compared_candidate_id == candidate_id:
+                continue
+            hold_rmse = _as_float(row.get("hold_rmse_mean_deg"))
+            peak_error = _as_float(row.get("peak_error_mean_deg"))
+            outputs.append(
+                {
+                    "task": task,
+                    f"{candidate_label}_candidate_id": candidate_id,
+                    "candidate_id": compared_candidate_id,
+                    "probe_pair": [probe_pair[0], probe_pair[1]],
+                    f"improvement_vs_{candidate_label}": ref_hold_rmse - hold_rmse,
+                    f"peak_improvement_vs_{candidate_label}": ref_peak_error - peak_error,
+                    "candidate_trial_count": int(row.get("trial_count", 0)),
+                    f"{candidate_label}_trial_count": int(comparator.get("trial_count", 0)),
+                }
+            )
+    return outputs
+
+
+def _probe_alignment(
+    pairwise_vs_reference: Sequence[Mapping[str, object]],
+    pairwise_vs_anchor: Sequence[Mapping[str, object]],
+    *,
+    reference_candidate_id: str,
+    primary_candidate_id: str | None,
+) -> dict[str, Any]:
+    reference_supported = [
+        row for row in pairwise_vs_reference
+        if primary_candidate_id is None or str(row.get("candidate_id")) == primary_candidate_id
+        if _as_float(row.get("improvement_vs_reference")) > 0.0
+    ]
+    anchor_supported = [
+        row for row in pairwise_vs_anchor
+        if primary_candidate_id is None or str(row.get("candidate_id")) == primary_candidate_id
+        if _as_float(row.get("improvement_vs_engineering_anchor")) > 0.0
+    ]
+    if primary_candidate_id is None:
+        status = "no_primary_candidate"
+    elif reference_supported and anchor_supported:
+        status = "supports_primary_probe_alignment"
+    elif reference_supported:
+        status = "supports_primary_probe_over_reference_only"
+    elif pairwise_vs_reference:
+        status = "mixed_or_not_supported"
+    else:
+        status = "not_enough_probe_data"
+    return {
+        "status": status,
+        "reference_candidate_id": reference_candidate_id,
+        "primary_candidate_id": primary_candidate_id,
+        "reference_supported_rows": len(reference_supported),
+        "anchor_supported_rows": len(anchor_supported),
+    }
+
+
+def _primary_candidate_from_manifest(manifest: Mapping[str, object]) -> str | None:
+    for row in _sequence_of_mappings(manifest.get("candidate_validations", [])):
+        if str(row.get("route_status")) == "primary_validate":
+            return str(row.get("candidate_id"))
+    return None
+
+
+def _context_id_from_payload(payload: Mapping[str, object]) -> str:
+    task = str(payload.get("task", "task"))
+    probe_pair = payload.get("probe_pair")
+    if isinstance(probe_pair, Sequence) and not isinstance(probe_pair, (str, bytes)) and len(probe_pair) == 2:
+        return f"{task}:pair_{probe_pair[0]}_{probe_pair[1]}"
+    return task
+
+
+def _engineering_adjustment_summary(
+    coordination_trials: Sequence[Mapping[str, object]],
+) -> dict[str, Any]:
+    adapted_trials = [
+        row for row in coordination_trials
+        if _mapping(row.get("contact_settled_passive_joint_targets", {}))
+    ]
+    stabilization_events = [
+        event
+        for row in coordination_trials
+        for event in _sequence_of_mappings(row.get("pretrial_pose_stabilization_events", []))
+    ]
+    return {
+        "contact_settled_trial_count": len(adapted_trials),
+        "contact_settled_candidates": sorted({
+            str(row.get("candidate_id")) for row in adapted_trials
+        }),
+        "max_contact_settled_error_deg": max(
+            (
+                max(
+                    _as_float(value)
+                    for value in _mapping(row.get("contact_settled_passive_joint_errors_deg", {})).values()
+                )
+                for row in adapted_trials
+                if _mapping(row.get("contact_settled_passive_joint_errors_deg", {}))
+            ),
+            default=0.0,
+        ),
+        "pretrial_pose_stabilization_event_count": len(stabilization_events),
+        "pretrial_pose_stabilization_max_attempts": max(
+            (int(event.get("attempt_count", 0)) for event in stabilization_events),
+            default=0,
+        ),
     }
 
 
@@ -391,6 +603,19 @@ def _collect_coordination_trials(
                     "grasp_mode": grasp_mode,
                     "hardware_confounds": hardware_confounds,
                     "notes": trial_notes,
+                    "contact_settled_passive_joint_targets": dict(
+                        _mapping(payload.get("contact_settled_passive_joint_targets", {}))
+                    ),
+                    "contact_settled_passive_joint_nominal_targets": dict(
+                        _mapping(payload.get("contact_settled_passive_joint_nominal_targets", {}))
+                    ),
+                    "contact_settled_passive_joint_errors_deg": dict(
+                        _mapping(payload.get("contact_settled_passive_joint_errors_deg", {}))
+                    ),
+                    "pretrial_pose_stabilization_events": [
+                        dict(item)
+                        for item in _sequence_of_mappings(payload.get("pretrial_pose_stabilization_events", []))
+                    ],
                     "trial_valid_for_analysis": analysis_valid,
                     "trial_valid_for_freeze": freeze_valid,
                     "trial_validity_label": (
@@ -419,12 +644,18 @@ def _coordination_stats(trials: Sequence[Mapping[str, object]]) -> list[dict[str
         rmse_left = [_as_float(row.get("rmse_left")) for row in rows]
         n_samples = [int(row.get("n_samples", 0)) for row in rows]
         freeze_valid_count = sum(1 for row in rows if row.get("trial_valid_for_freeze"))
+        contact_settled_count = sum(
+            1
+            for row in rows
+            if _mapping(row.get("contact_settled_passive_joint_targets", {}))
+        )
         stats_rows.append(
             {
                 "candidate_id": candidate_id,
                 "task": task,
                 "trial_count": len(rows),
                 "freeze_valid_trial_count": freeze_valid_count,
+                "contact_settled_trial_count": contact_settled_count,
                 "rmse_total_mean": _mean(rmse_total),
                 "rmse_total_std": _std(rmse_total),
                 "rmse_total_sem": _sem(rmse_total),

@@ -14,6 +14,8 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "matrix_d_real"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_CONTROL_CONTROLLER_MAP = {
     "decoupled_ref": ("decoupled", {}),
     "j_coupled_eng": ("j_coupled", {"kp_comp": 2.0, "kd_comp": 0.1, "alpha_pos": 0.3}),
@@ -46,9 +48,57 @@ def dump_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, f, indent=2)
 
 
+def _load_annotation(args: argparse.Namespace) -> dict[str, Any] | None:
+    annotation: dict[str, Any] = {}
+    if args.annotation_input:
+        annotation = load_json(Path(args.annotation_input))
+    if args.grasp_mode is not None:
+        annotation["grasp_mode"] = args.grasp_mode
+    if args.hardware_confound:
+        annotation["hardware_confounds"] = list(args.hardware_confound)
+    if args.operator_note:
+        annotation["operator_notes"] = list(args.operator_note)
+    return annotation or None
+
+
+def _auto_build_report_and_aggregate(
+    manifest: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+) -> tuple[Path | None, Path | None]:
+    from bsreal.experiment.matrix_d_real_report import (
+        build_matrix_d_real_cross_run_report,
+        build_matrix_d_real_report,
+    )
+
+    run_dir = Path(args.output_dir) / str(manifest["run_id"])
+    annotation = _load_annotation(args)
+    report = build_matrix_d_real_report(run_dir, annotation=annotation)
+    report_path = run_dir / "matrix_d_real_report.json"
+    dump_json(report_path, report)
+
+    aggregate_path: Path | None = None
+    aggregate_inputs = [Path(path) for path in args.aggregate_report_input]
+    if aggregate_inputs:
+        reports = [load_json(path) for path in aggregate_inputs]
+        reports.append(report)
+        aggregate = build_matrix_d_real_cross_run_report(
+            reports,
+            min_clean_runs_for_freeze=int(args.min_clean_runs_for_freeze),
+        )
+        aggregate_path = (
+            Path(args.aggregate_output)
+            if args.aggregate_output
+            else run_dir / "matrix_d_real_cross_run_report.json"
+        )
+        dump_json(aggregate_path, aggregate)
+    return report_path, aggregate_path
+
+
 def validate_matrix_c2_real(payload: dict[str, Any]) -> None:
-    if payload.get("schema") != "matrix_c2_real_v1":
-        raise ValueError("Expected matrix_c2_real_v1 payload")
+    schema = str(payload.get("schema"))
+    if schema not in {"matrix_c2_real_v1", "matrix_c_after_e_control_v1"}:
+        raise ValueError("Expected matrix_c2_real_v1 or matrix_c_after_e_control_v1 payload")
     family_type = str(payload.get("source_family_type"))
     if family_type not in {"morphology", "control"}:
         raise ValueError("This D_real_v1 runner supports only morphology or control family payloads")
@@ -60,7 +110,10 @@ def validate_matrix_c2_real(payload: dict[str, Any]) -> None:
         raise ValueError("Matrix C2 real payload must not use raw channels")
     if not risk_guards.get("baseline_reserved_as_reference", False):
         raise ValueError("Matrix C2 real payload must reserve a reference baseline")
-    if risk_guards.get("decision_semantics") != "real_robot_validation_routing_not_winner":
+    if risk_guards.get("decision_semantics") not in {
+        "real_robot_validation_routing_not_winner",
+        "confirmatory_validation_routing_after_matrix_e",
+    }:
         raise ValueError("Matrix C2 real payload must remain routing-only")
     if family_type == "control" and not risk_guards.get("engineering_anchor_reserved", False):
         raise ValueError("Control Matrix C2 real payload must reserve an engineering anchor")
@@ -137,6 +190,7 @@ def make_command_step(
     command: list[str],
     output_dir: Path | None,
     supports_dry_run: bool,
+    artifact_path: Path | None = None,
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
@@ -148,6 +202,7 @@ def make_command_step(
         "command": command,
         "cwd": str(REPO_ROOT),
         "output_dir": str(output_dir) if output_dir else None,
+        "artifact_path": str(artifact_path) if artifact_path else None,
         "supports_dry_run": supports_dry_run,
         "notes": notes or [],
         "status": "planned",
@@ -281,8 +336,14 @@ def candidate_validation_steps(
                 args.left_port,
                 "--right-port",
                 args.right_port,
+                "--summary-output",
+                str(candidate_dir / "preflight" / "preflight_dual_arm.json"),
+                "--sync-error-threshold-deg",
+                str(args.preflight_sync_threshold_deg),
+                "--require-sync-ok" if args.strict_preflight_sync_gate else "--no-require-sync-ok",
             ],
             output_dir=None,
+            artifact_path=candidate_dir / "preflight" / "preflight_dual_arm.json",
             supports_dry_run=False,
         )
     )
@@ -431,8 +492,14 @@ def control_candidate_validation_steps(
                 args.left_port,
                 "--right-port",
                 args.right_port,
+                "--summary-output",
+                str(candidate_dir / "preflight" / "preflight_dual_arm.json"),
+                "--sync-error-threshold-deg",
+                str(args.preflight_sync_threshold_deg),
+                "--require-sync-ok" if args.strict_preflight_sync_gate else "--no-require-sync-ok",
             ],
             output_dir=None,
+            artifact_path=candidate_dir / "preflight" / "preflight_dual_arm.json",
             supports_dry_run=False,
         )
     )
@@ -686,6 +753,8 @@ def build_manifest(
             "control_probe_frequency": args.control_probe_frequency,
             "control_probe_duration": args.control_probe_duration,
             "skip_control_probe": args.skip_control_probe,
+            "strict_preflight_sync_gate": args.strict_preflight_sync_gate,
+            "preflight_sync_threshold_deg": args.preflight_sync_threshold_deg,
         },
         "decision_semantics": {
             "mode": c2_payload.get("routing_mode"),
@@ -749,6 +818,7 @@ def execute_manifest(manifest: dict[str, Any], args: argparse.Namespace) -> dict
                 "step_kind": step.get("step_kind"),
                 "stage": step.get("stage"),
                 "protocol_family": step.get("protocol_family"),
+                "artifact_path": step.get("artifact_path"),
                 "status": "planned",
             }
 
@@ -814,6 +884,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control-probe-frequency", type=float, default=0.5)
     parser.add_argument("--control-probe-duration", type=float, default=10.0)
     parser.add_argument("--skip-control-probe", action="store_true", help="Skip D1 control-probe steps for control-family runs")
+    parser.add_argument(
+        "--strict-preflight-sync-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Turn preflight synchronization warnings into a hard gate before D1/D2 continue",
+    )
+    parser.add_argument("--preflight-sync-threshold-deg", type=float, default=1.0)
+    parser.add_argument("--annotation-input", default=None, help="Optional annotation JSON for auto-built D report")
+    parser.add_argument("--grasp-mode", default=None, choices=["true_grasp", "wrist_rest", "mixed", "unknown"])
+    parser.add_argument("--hardware-confound", action="append", default=[])
+    parser.add_argument("--operator-note", action="append", default=[])
+    parser.add_argument("--auto-build-report", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--aggregate-report-input", action="append", default=[])
+    parser.add_argument("--aggregate-output", default=None)
+    parser.add_argument("--min-clean-runs-for-freeze", type=int, default=2)
     return parser.parse_args()
 
 
@@ -837,6 +922,15 @@ def main() -> int:
     execution_path = Path(args.output_dir) / manifest["run_id"] / "matrix_d_real_execution.json"
     dump_json(execution_path, execution_log)
     print(f"[MATRIX_D_REAL] Wrote execution log to {execution_path}")
+
+    report_path = None
+    aggregate_path = None
+    if args.auto_build_report:
+        report_path, aggregate_path = _auto_build_report_and_aggregate(manifest, args=args)
+        if report_path is not None:
+            print(f"[MATRIX_D_REAL] Wrote report to {report_path}")
+        if aggregate_path is not None:
+            print(f"[MATRIX_D_REAL] Wrote cross-run aggregate to {aggregate_path}")
 
     failed_steps = [step for step in execution_log.get("steps", []) if step.get("status") == "failed"]
     return 1 if failed_steps else 0

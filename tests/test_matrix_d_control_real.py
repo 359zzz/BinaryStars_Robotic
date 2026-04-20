@@ -190,6 +190,16 @@ def _args(tmp_path: Path) -> argparse.Namespace:
         control_probe_frequency=0.5,
         control_probe_duration=5.0,
         skip_control_probe=False,
+        strict_preflight_sync_gate=True,
+        preflight_sync_threshold_deg=1.0,
+        annotation_input=None,
+        grasp_mode=None,
+        hardware_confound=[],
+        operator_note=[],
+        auto_build_report=False,
+        aggregate_report_input=[],
+        aggregate_output=None,
+        min_clean_runs_for_freeze=2,
     )
 
 
@@ -215,6 +225,12 @@ def test_build_manifest_supports_control_family(tmp_path: Path) -> None:
     assert anchor_row["controller_name"] == "j_coupled"
     assert all(step["step_kind"] == "command" for step in anchor_row["steps"])
     assert any(step["protocol_family"] == "control_probe" for step in anchor_row["steps"])
+    assert any(
+        step["protocol_family"] == "preflight_dual_arm"
+        and "--require-sync-ok" in step["command"]
+        and "--summary-output" in step["command"]
+        for step in anchor_row["steps"]
+    )
     assert any(
         step["protocol_family"] == "downstream_coordination"
         and "j_coupled" in step["command"]
@@ -290,6 +306,19 @@ def test_build_report_supports_control_probe_and_anchor(tmp_path: Path) -> None:
         "s_adaptive_entropy": 1.10,
     }
     for candidate_id, rmse in per_candidate.items():
+        preflight_dir = run_dir / candidate_id / "preflight"
+        preflight_dir.mkdir(parents=True)
+        (preflight_dir / "preflight_dual_arm.json").write_text(
+            json.dumps(
+                {
+                    "schema": "coordination_preflight_summary_v1",
+                    "status": "passed",
+                    "sync_check": {"sync_error_deg": 0.2, "sync_ok": True},
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         probe_dir = run_dir / candidate_id / "control_probe_pair_2_10"
         probe_dir.mkdir(parents=True)
         (probe_dir / "control_probe_pair_2_10.json").write_text(
@@ -327,6 +356,18 @@ def test_build_report_supports_control_probe_and_anchor(tmp_path: Path) -> None:
                     "s_rho_l": 1.0,
                     "j_cross_max": 0.5,
                     "n_samples": 100,
+                    "contact_settled_passive_joint_targets": (
+                        {"left_joint_5.pos": -6.0} if candidate_id == "c_coupled_cross" else {}
+                    ),
+                    "contact_settled_passive_joint_nominal_targets": (
+                        {"left_joint_5.pos": -75.0} if candidate_id == "c_coupled_cross" else {}
+                    ),
+                    "contact_settled_passive_joint_errors_deg": (
+                        {"left_joint_5.pos": 69.0} if candidate_id == "c_coupled_cross" else {}
+                    ),
+                    "pretrial_pose_stabilization_events": [
+                        {"stage": "post_grasp_settle", "attempt_count": 1, "recovered": True}
+                    ],
                     "timestamp_utc": "2026-04-18T00:00:00+00:00",
                 },
                 indent=2,
@@ -340,10 +381,29 @@ def test_build_report_supports_control_probe_and_anchor(tmp_path: Path) -> None:
     )
 
     assert report["engineering_anchor_candidate_id"] == "j_coupled_eng"
+    assert len(report["d1_summary"]["preflight_runs"]) == 4
     assert len(report["d1_summary"]["control_probe_runs"]) == 4
+    assert report["d1_summary"]["control_probe_pairwise_vs_reference"]
     assert report["statistical_report"]["c2_alignment"]["status"] == "supports_c2_routing"
+    assert report["statistical_report"]["d1_probe_alignment"]["status"] in {
+        "supports_primary_probe_alignment",
+        "supports_primary_probe_over_reference_only",
+    }
     assert (
         report["statistical_report"]["engineering_anchor_alignment"]["status"]
         == "primary_beats_engineering_anchor"
     )
     assert report["statistical_report"]["pairwise_vs_engineering_anchor"]
+    assert report["engineering_adjustments"]["contact_settled_trial_count"] == 1
+
+
+def test_build_manifest_accepts_matrix_c_after_e_control_payload(tmp_path: Path) -> None:
+    module = _runner_module()
+    c_after_e = _control_c2()
+    c_after_e["schema"] = "matrix_c_after_e_control_v1"
+    c_after_e["risk_guards"]["decision_semantics"] = "confirmatory_validation_routing_after_matrix_e"
+
+    manifest = module.build_manifest(c_after_e, _control_graph(), _args(tmp_path))
+
+    assert manifest["source_family_type"] == "control"
+    assert manifest["candidate_validations"][0]["candidate_id"] == "decoupled_ref"

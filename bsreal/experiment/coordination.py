@@ -88,6 +88,10 @@ class CoordinationResult:
     s_rho_l: float = 0.0
     j_cross_max: float = 0.0
     n_samples: int = 0
+    contact_settled_passive_joint_targets: dict[str, float] = field(default_factory=dict)
+    contact_settled_passive_joint_nominal_targets: dict[str, float] = field(default_factory=dict)
+    contact_settled_passive_joint_errors_deg: dict[str, float] = field(default_factory=dict)
+    pretrial_pose_stabilization_events: list[dict[str, object]] = field(default_factory=list)
 
 
 def _openarm_gripper_targets(robot) -> tuple[float, float]:
@@ -270,7 +274,8 @@ def _stabilize_arm_pose_if_needed(
     custom_kd: dict[str, float] | None,
     max_error_deg: float = 20.0,
     max_attempts: int = 4,
-) -> None:
+) -> dict[str, object]:
+    first_key, first_error, first_current, first_target = _worst_pose_error(robot, arm_hold_cmd)
     for attempt_index in range(max_attempts):
         worst_key, worst_error, worst_current, worst_target = _worst_pose_error(
             robot, arm_hold_cmd
@@ -286,7 +291,19 @@ def _stabilize_arm_pose_if_needed(
                     worst_target,
                     worst_error,
                 )
-            return
+            return {
+                "recovered": True,
+                "attempt_count": attempt_index,
+                "initial_worst_key": first_key,
+                "initial_error_deg": first_error,
+                "initial_current_deg": first_current,
+                "initial_target_deg": first_target,
+                "final_worst_key": worst_key,
+                "final_error_deg": worst_error,
+                "final_current_deg": worst_current,
+                "final_target_deg": worst_target,
+                "max_error_deg": max_error_deg,
+            }
         logger.warning(
             "Arm pose drift before trial start: worst=%s current=%.1f target=%.1f error=%.1f deg > %.1f deg; correcting (attempt %d/%d)",
             worst_key,
@@ -678,6 +695,7 @@ def run_coordination_trial(
         )
         print("  Grippers closing...")
         if controller.robot_type == "openarm":
+            contact_nominal_targets: dict[str, float] = {}
             active_gripper_cmd = _close_grippers_with_escalation(
                 robot,
                 open_target=gripper_open,
@@ -699,20 +717,42 @@ def run_coordination_trial(
                 custom_kd=gripper_hold_kd,
             )
             time.sleep(0.3)
+            for key in arm_hold_cmd:
+                if _joint_suffix_from_action_key(key) in CONTACT_SETTLED_PASSIVE_JOINTS:
+                    contact_nominal_targets[key] = float(arm_hold_cmd[key])
             contact_adapted = _adapt_contact_settled_passive_joints(robot, arm_hold_cmd)
             if contact_adapted:
+                result.contact_settled_passive_joint_targets = {
+                    key: float(value) for key, value in contact_adapted.items()
+                }
+                result.contact_settled_passive_joint_nominal_targets = {
+                    key: float(contact_nominal_targets.get(key, value))
+                    for key, value in contact_adapted.items()
+                }
+                result.contact_settled_passive_joint_errors_deg = {
+                    key: abs(
+                        float(value)
+                        - float(contact_nominal_targets.get(key, value))
+                    )
+                    for key, value in contact_adapted.items()
+                }
                 _apply_arm_hold_overrides_to_target_matrix(
                     q_target_all_deg,
                     all_joint_names,
                     arm_hold_cmd,
                     contact_adapted,
                 )
-            _stabilize_arm_pose_if_needed(
-                robot,
-                arm_hold_cmd=arm_hold_cmd,
-                active_gripper_cmd=active_gripper_cmd,
-                custom_kp=gripper_hold_kp,
-                custom_kd=gripper_hold_kd,
+            result.pretrial_pose_stabilization_events.append(
+                {
+                    "stage": "post_grasp_settle",
+                    **_stabilize_arm_pose_if_needed(
+                        robot,
+                        arm_hold_cmd=arm_hold_cmd,
+                        active_gripper_cmd=active_gripper_cmd,
+                        custom_kp=gripper_hold_kp,
+                        custom_kd=gripper_hold_kd,
+                    ),
+                }
             )
         else:
             active_gripper_cmd = _send_gripper_repeated(
@@ -731,12 +771,17 @@ def run_coordination_trial(
     )
 
     if has_object and controller.robot_type == "openarm":
-        _stabilize_arm_pose_if_needed(
-            robot,
-            arm_hold_cmd=arm_hold_cmd,
-            active_gripper_cmd=active_gripper_cmd,
-            custom_kp=gripper_hold_kp,
-            custom_kd=gripper_hold_kd,
+        result.pretrial_pose_stabilization_events.append(
+            {
+                "stage": "pre_loop_confirm",
+                **_stabilize_arm_pose_if_needed(
+                    robot,
+                    arm_hold_cmd=arm_hold_cmd,
+                    active_gripper_cmd=active_gripper_cmd,
+                    custom_kp=gripper_hold_kp,
+                    custom_kd=gripper_hold_kd,
+                ),
+            }
         )
 
     t0 = time.monotonic()
@@ -1018,6 +1063,10 @@ def _save_result(result: CoordinationResult, path: Path):
         "rmse_total": result.rmse_total,
         "s_rho_l": result.s_rho_l,
         "j_cross_max": result.j_cross_max,
+        "contact_settled_passive_joint_targets": result.contact_settled_passive_joint_targets,
+        "contact_settled_passive_joint_nominal_targets": result.contact_settled_passive_joint_nominal_targets,
+        "contact_settled_passive_joint_errors_deg": result.contact_settled_passive_joint_errors_deg,
+        "pretrial_pose_stabilization_events": result.pretrial_pose_stabilization_events,
         "timestamps": result.timestamps,
         "q_target_deg": result.q_target_deg,
         "q_actual_deg": result.q_actual_deg,
