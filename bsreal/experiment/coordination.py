@@ -55,6 +55,8 @@ WRIST_STABILIZE_KP_CAP = 60.0
 WRIST_STABILIZE_KD_CAP = 0.90
 START_POSE_CORRECTION_DURATION_S = 1.8
 START_POSE_CORRECTION_SETTLE_S = 0.4
+CONTACT_SETTLED_PASSIVE_JOINTS = {"joint_5"}
+CONTACT_SETTLE_ADAPT_ERROR_DEG = 30.0
 
 
 @dataclass
@@ -160,6 +162,64 @@ def _pose_error_dict(
         current = float(obs.get(key, 0.0))
         errors[key] = abs(current - float(target))
     return errors
+
+
+def _joint_suffix_from_action_key(key: str) -> str:
+    joint_name = key.removesuffix(".pos")
+    return joint_name.removeprefix("right_").removeprefix("left_")
+
+
+def _adapt_contact_settled_passive_joints(
+    robot,
+    arm_hold_cmd: dict[str, float],
+    *,
+    min_error_deg: float = CONTACT_SETTLE_ADAPT_ERROR_DEG,
+) -> dict[str, float]:
+    """Accept contact back-action on passive wrist-roll joints after grasping.
+
+    The bar can mechanically settle wrist roll before a trial starts. For joints
+    that are not active trajectory axes, using the settled value is safer than
+    trying to force the nominal pre-contact angle through the payload.
+    """
+    obs = robot.get_observation()
+    adapted: dict[str, float] = {}
+    for key, target in list(arm_hold_cmd.items()):
+        if not key.endswith(".pos"):
+            continue
+        if _joint_suffix_from_action_key(key) not in CONTACT_SETTLED_PASSIVE_JOINTS:
+            continue
+        if key not in obs:
+            continue
+        current = float(obs[key])
+        error = abs(current - float(target))
+        if error < min_error_deg:
+            continue
+        logger.warning(
+            "Contact-settled passive joint %s moved from nominal %.1f to %.1f "
+            "(error %.1f deg); adapting this trial's hold target instead of forcing it.",
+            key,
+            float(target),
+            current,
+            error,
+        )
+        arm_hold_cmd[key] = current
+        adapted[key] = current
+    return adapted
+
+
+def _apply_arm_hold_overrides_to_target_matrix(
+    q_target_all_deg: np.ndarray,
+    all_joint_names: list[str],
+    arm_hold_cmd: dict[str, float],
+    override_keys: set[str] | dict[str, float],
+) -> None:
+    index_by_action_key = {
+        f"{joint_name}.pos": index for index, joint_name in enumerate(all_joint_names)
+    }
+    for key in override_keys:
+        index = index_by_action_key.get(key)
+        if index is not None:
+            q_target_all_deg[:, index] = float(arm_hold_cmd[key])
 
 
 def _worst_pose_error(
@@ -639,6 +699,14 @@ def run_coordination_trial(
                 custom_kd=gripper_hold_kd,
             )
             time.sleep(0.3)
+            contact_adapted = _adapt_contact_settled_passive_joints(robot, arm_hold_cmd)
+            if contact_adapted:
+                _apply_arm_hold_overrides_to_target_matrix(
+                    q_target_all_deg,
+                    all_joint_names,
+                    arm_hold_cmd,
+                    contact_adapted,
+                )
             _stabilize_arm_pose_if_needed(
                 robot,
                 arm_hold_cmd=arm_hold_cmd,

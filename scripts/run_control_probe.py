@@ -30,6 +30,7 @@ from bsreal.experiment.coordination import (
     HEAVY_OBJECT_MASS_KG,
     POST_OBJECT_COOLDOWN_S,
     _close_grippers_with_escalation,
+    _adapt_contact_settled_passive_joints,
     _current_dual_gripper_cmd,
     _gripper_targets,
     _hold_gripper_target_until_enter,
@@ -176,6 +177,7 @@ def _prepare_object_if_needed(
         custom_kd=hold_kd,
     )
     time.sleep(0.3)
+    _adapt_contact_settled_passive_joints(robot, arm_hold_cmd)
     _stabilize_arm_pose_if_needed(
         robot,
         arm_hold_cmd=arm_hold_cmd,
@@ -184,6 +186,17 @@ def _prepare_object_if_needed(
         custom_kd=hold_kd,
     )
     return True, active_gripper_cmd, (gripper_open, gripper_close)
+
+
+def _sync_base_target_from_arm_hold_cmd(
+    base_target_deg: np.ndarray,
+    all_joint_names: list[str],
+    arm_hold_cmd: dict[str, float],
+) -> None:
+    for index, joint_name in enumerate(all_joint_names):
+        key = f"{joint_name}.pos"
+        if key in arm_hold_cmd:
+            base_target_deg[index] = float(arm_hold_cmd[key])
 
 
 def _release_object_if_needed(
@@ -558,6 +571,11 @@ def main() -> int:
                 robot,
                 object_mass_kg=float(obj["mass"]),
                 arm_hold_cmd=arm_hold_cmd,
+            )
+            _sync_base_target_from_arm_hold_cmd(
+                base_target_deg,
+                all_joint_names,
+                arm_hold_cmd,
             )
             if has_object:
                 _stabilize_arm_pose_if_needed(
