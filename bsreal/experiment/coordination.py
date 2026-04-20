@@ -47,10 +47,14 @@ GRIPPER_HOLD_KD = {"gripper": 0.2}
 GRIPPER_HEAVY_HOLD_KP = {"gripper": 10.0}
 GRIPPER_HEAVY_HOLD_KD = {"gripper": 0.25}
 POST_OBJECT_COOLDOWN_S = 4.0
-WRIST_HOLD_KP = {"joint_5": 18.0}
-WRIST_HOLD_KD = {"joint_5": 0.35}
-WRIST_HEAVY_HOLD_KP = {"joint_5": 22.0}
-WRIST_HEAVY_HOLD_KD = {"joint_5": 0.45}
+WRIST_HOLD_KP = {"joint_5": 30.0}
+WRIST_HOLD_KD = {"joint_5": 0.40}
+WRIST_HEAVY_HOLD_KP = {"joint_5": 38.0}
+WRIST_HEAVY_HOLD_KD = {"joint_5": 0.55}
+WRIST_STABILIZE_KP_CAP = 60.0
+WRIST_STABILIZE_KD_CAP = 0.90
+START_POSE_CORRECTION_DURATION_S = 1.8
+START_POSE_CORRECTION_SETTLE_S = 0.4
 
 
 @dataclass
@@ -158,6 +162,45 @@ def _pose_error_dict(
     return errors
 
 
+def _worst_pose_error(
+    robot,
+    arm_hold_cmd: dict[str, float],
+) -> tuple[str, float, float, float]:
+    obs = robot.get_observation()
+    worst_key = ""
+    worst_current = 0.0
+    worst_target = 0.0
+    worst_error = -1.0
+    for key, target in arm_hold_cmd.items():
+        current = float(obs.get(key, 0.0))
+        error = abs(current - float(target))
+        if error > worst_error:
+            worst_key = key
+            worst_current = current
+            worst_target = float(target)
+            worst_error = error
+    return worst_key, worst_error, worst_current, worst_target
+
+
+def _escalate_wrist_stabilization_gains(
+    custom_kp: dict[str, float] | None,
+    custom_kd: dict[str, float] | None,
+    *,
+    attempt_index: int,
+) -> tuple[dict[str, float] | None, dict[str, float] | None]:
+    if custom_kp is None and custom_kd is None:
+        return custom_kp, custom_kd
+
+    scale = 1.0 + 0.35 * attempt_index
+    kp = dict(custom_kp or {})
+    kd = dict(custom_kd or {})
+    if "joint_5" in kp:
+        kp["joint_5"] = min(WRIST_STABILIZE_KP_CAP, kp["joint_5"] * scale)
+    if "joint_5" in kd:
+        kd["joint_5"] = min(WRIST_STABILIZE_KD_CAP, kd["joint_5"] * scale)
+    return kp or None, kd or None
+
+
 def _stabilize_arm_pose_if_needed(
     robot,
     *,
@@ -166,24 +209,29 @@ def _stabilize_arm_pose_if_needed(
     custom_kp: dict[str, float] | None,
     custom_kd: dict[str, float] | None,
     max_error_deg: float = 20.0,
-    max_attempts: int = 3,
+    max_attempts: int = 4,
 ) -> None:
     for attempt_index in range(max_attempts):
-        errors = _pose_error_dict(robot, arm_hold_cmd)
-        worst_key, worst_error = max(errors.items(), key=lambda item: item[1])
+        worst_key, worst_error, worst_current, worst_target = _worst_pose_error(
+            robot, arm_hold_cmd
+        )
         if worst_error <= max_error_deg:
             if attempt_index > 0:
                 logger.info(
-                    "Recovered arm pose within %.1f deg after %d correction attempt(s); worst=%s %.1f deg",
+                    "Recovered arm pose within %.1f deg after %d correction attempt(s); worst=%s current=%.1f target=%.1f error=%.1f deg",
                     max_error_deg,
                     attempt_index,
                     worst_key,
+                    worst_current,
+                    worst_target,
                     worst_error,
                 )
             return
         logger.warning(
-            "Arm pose drift before trial start: worst=%s %.1f deg > %.1f deg; correcting (attempt %d/%d)",
+            "Arm pose drift before trial start: worst=%s current=%.1f target=%.1f error=%.1f deg > %.1f deg; correcting (attempt %d/%d)",
             worst_key,
+            worst_current,
+            worst_target,
             worst_error,
             max_error_deg,
             attempt_index + 1,
@@ -191,19 +239,37 @@ def _stabilize_arm_pose_if_needed(
         )
         settle_cmd = dict(arm_hold_cmd)
         settle_cmd.update(active_gripper_cmd)
+        settle_kp, settle_kd = _escalate_wrist_stabilization_gains(
+            custom_kp,
+            custom_kd,
+            attempt_index=attempt_index,
+        )
         slow_move(
             robot,
             settle_cmd,
-            duration_s=1.2,
-            custom_kp=custom_kp,
-            custom_kd=custom_kd,
+            duration_s=START_POSE_CORRECTION_DURATION_S,
+            custom_kp=settle_kp,
+            custom_kd=settle_kd,
         )
-        time.sleep(0.3)
+        time.sleep(START_POSE_CORRECTION_SETTLE_S)
+        post_key, post_error, post_current, post_target = _worst_pose_error(
+            robot, arm_hold_cmd
+        )
+        logger.info(
+            "Post-correction arm pose: worst=%s current=%.1f target=%.1f error=%.1f deg",
+            post_key,
+            post_current,
+            post_target,
+            post_error,
+        )
 
-    errors = _pose_error_dict(robot, arm_hold_cmd)
-    worst_key, worst_error = max(errors.items(), key=lambda item: item[1])
+    worst_key, worst_error, worst_current, worst_target = _worst_pose_error(
+        robot, arm_hold_cmd
+    )
     raise SafetyError(
-        f"Failed to stabilize start pose before trial: {worst_key} error {worst_error:.1f} deg > {max_error_deg:.1f} deg"
+        "Failed to stabilize start pose before trial: "
+        f"{worst_key} current={worst_current:.1f} target={worst_target:.1f} "
+        f"error {worst_error:.1f} deg > {max_error_deg:.1f} deg"
     )
 
 
