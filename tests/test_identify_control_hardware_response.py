@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def _repo_root() -> Path:
@@ -91,3 +92,70 @@ def test_script_dry_run_writes_matrix_b_compatible_payload(tmp_path: Path) -> No
     assert candidate_payload["response_source_details"]["identified_columns"] == [2, 10]
     assert len(candidate_payload["response_matrix"]) == 14
     assert len(candidate_payload["response_matrix"][0]) == 14
+
+
+def test_main_keeps_robot_connected_across_multiple_contexts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    output_path = tmp_path / "hardware_response.json"
+    events: list[str] = []
+
+    class FakeRobot:
+        def connect(self):
+            events.append("connect")
+
+        def disconnect(self):
+            events.append("disconnect")
+
+    def fake_identify_candidate_response(**kwargs):
+        context = kwargs["context"]
+        candidate_id = kwargs["candidate_id"]
+        return {
+            "response_matrix": [[0.0 for _ in range(module.N_TOTAL)] for _ in range(module.N_TOTAL)],
+            "response_source": module.RESPONSE_SOURCE,
+            "response_axis": module.RESPONSE_AXIS,
+            "response_source_details": {
+                "context_id": context.context_id,
+                "candidate_id": candidate_id,
+            },
+        }
+
+    monkeypatch.setattr(module, "_make_robot", lambda _args: FakeRobot())
+    monkeypatch.setattr(module, "_prepare_robot_start", lambda *args, **kwargs: events.append("prepare"))
+    monkeypatch.setattr(
+        module,
+        "_prepare_object_if_needed",
+        lambda *args, **kwargs: (False, {}, (-65.0, 0.0)),
+    )
+    monkeypatch.setattr(module, "_identify_candidate_response", fake_identify_candidate_response)
+    monkeypatch.setattr(module, "_release_object_if_needed", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "slow_move", lambda *args, **kwargs: events.append("park"))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "identify_control_hardware_response.py",
+            "--context",
+            "bar_only:bar_b",
+            "--context",
+            "bar_loaded:bar_b",
+            "--candidate-id",
+            "decoupled_ref",
+            "--columns",
+            "2",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert module.main() == 0
+
+    assert events.count("connect") == 1
+    assert events.count("disconnect") == 1
+    assert events.count("prepare") == 2
+    assert events.count("park") == 2
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert payload["context_ids"] == ["bar_only:bar_b", "bar_loaded:bar_b"]

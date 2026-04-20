@@ -514,6 +514,8 @@ def _identify_context(
     candidate_specs: dict[str, tuple[str, dict[str, object]]],
     columns: list[int],
     args: argparse.Namespace,
+    robot=None,
+    disconnect_when_done: bool = True,
 ) -> dict[str, object]:
     _, _, all_joint_names = _joint_name_lists(N_PER_ARM)
     base_target_deg = _base_target_deg(context.config_name, all_joint_names)
@@ -522,14 +524,16 @@ def _identify_context(
         for index, joint_name in enumerate(all_joint_names)
     }
 
-    robot = None
     active_gripper_cmd: dict[str, float] = {}
     gripper_targets = (-65.0, 0.0)
     has_object = False
+    created_robot = False
     try:
         if not args.dry_run:
-            robot = _make_robot(args)
-            robot.connect()
+            if robot is None:
+                robot = _make_robot(args)
+                robot.connect()
+                created_robot = True
             _prepare_robot_start(
                 robot,
                 base_target_deg=base_target_deg,
@@ -597,10 +601,11 @@ def _identify_context(
                 )
             except Exception:
                 logger.exception("Failed to park robot cleanly after hardware response identification")
-            try:
-                robot.disconnect()
-            except Exception:
-                logger.exception("Failed to disconnect robot cleanly")
+            if disconnect_when_done or created_robot:
+                try:
+                    robot.disconnect()
+                except Exception:
+                    logger.exception("Failed to disconnect robot cleanly")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -640,6 +645,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dt", type=float, default=0.02)
     parser.add_argument("--ramp-s", type=float, default=1.0)
     parser.add_argument("--settle-fraction", type=float, default=0.25)
+    parser.add_argument(
+        "--between-context-settle-s",
+        type=float,
+        default=POST_OBJECT_COOLDOWN_S,
+        help=(
+            "Connected hold/settle time between repeated contexts. Defaults to "
+            "Matrix D's post-object cooldown so bar_only -> bar_loaded does not "
+            "immediately disable/enable the arms."
+        ),
+    )
     parser.add_argument("--output", default=None)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -671,13 +686,41 @@ def main() -> int:
         "identified_columns": columns,
         "dry_run": bool(args.dry_run),
     }
-    for context in contexts:
-        payload[context.context_id] = _identify_context(
-            context=context,
-            candidate_specs=candidate_specs,
-            columns=columns,
-            args=args,
-        )
+    robot = None
+    try:
+        if not args.dry_run:
+            robot = _make_robot(args)
+            robot.connect()
+            logger.info(
+                "Connected once for %d context(s); keeping motors enabled between contexts.",
+                len(contexts),
+            )
+        for context_index, context in enumerate(contexts):
+            payload[context.context_id] = _identify_context(
+                context=context,
+                candidate_specs=candidate_specs,
+                columns=columns,
+                args=args,
+                robot=robot,
+                disconnect_when_done=False,
+            )
+            if (
+                robot is not None
+                and context_index < len(contexts) - 1
+                and float(args.between_context_settle_s) > 0.0
+            ):
+                logger.info(
+                    "Keeping robot connected between contexts for %.1fs before the next setup.",
+                    float(args.between_context_settle_s),
+                )
+                time.sleep(float(args.between_context_settle_s))
+    finally:
+        if robot is not None:
+            try:
+                logger.info("Disconnecting after all hardware response contexts are complete.")
+                robot.disconnect()
+            except Exception:
+                logger.exception("Failed to disconnect robot cleanly after hardware response contexts")
 
     output_path = Path(args.output) if args.output else (
         DEFAULT_OUTPUT / f"openarm_hardware_response_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
