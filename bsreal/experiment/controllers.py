@@ -155,24 +155,28 @@ class CCoupledController(JCoupledController):
 
 
 class SAdaptiveController(BaseController):
-    """Adaptive controller that switches based on entanglement entropy S(rho_L).
+    """Adaptive controller that blends around an entanglement-entropy gate.
 
-    S < threshold -> Decoupled (save computation)
-    S >= threshold -> C-coupled (need coordination)
+    Low-entropy contexts stay near Decoupled. High-entropy contexts approach
+    C-coupled. Around the threshold we use a smooth gate instead of a hard
+    switch so the controller remains locally identifiable and avoids abrupt
+    mode flips on real hardware.
     """
 
     def __init__(self, ir, n_per_arm=7, robot_type="openarm",
                  kp_comp=2.0, kd_comp=0.1, alpha_pos=0.3,
-                 M_obj=None, s_threshold=0.3, recompute_every=10):
+                 M_obj=None, s_threshold=1.75, transition_width=0.5, recompute_every=10):
         super().__init__(ir, n_per_arm, robot_type)
         self._decoupled = DecoupledController(ir, n_per_arm, robot_type)
         self._c_coupled = CCoupledController(
             ir, n_per_arm, robot_type, kp_comp, kd_comp, alpha_pos, M_obj,
         )
         self.s_threshold = s_threshold
+        self.transition_width = max(1e-6, float(transition_width))
         self.recompute_every = recompute_every
         self._step_count = 0
         self._current_S = 0.0
+        self._current_weight = 0.0
         self._using_coupled = False
 
     def set_object(self, M_obj: np.ndarray | None):
@@ -186,6 +190,10 @@ class SAdaptiveController(BaseController):
     def using_coupled(self) -> bool:
         return self._using_coupled
 
+    @property
+    def current_weight(self) -> float:
+        return self._current_weight
+
     def compute_action(self, t, q_current_rad, qdot_current,
                        q_target_rad, qdot_target):
         self._step_count += 1
@@ -193,16 +201,16 @@ class SAdaptiveController(BaseController):
         # Recompute S periodically (expensive)
         if self._step_count % self.recompute_every == 1:
             self._current_S = self._compute_entropy(q_current_rad)
-            self._using_coupled = self._current_S >= self.s_threshold
+            self._current_weight = self._blend_weight(self._current_S)
+            self._using_coupled = self._current_weight >= 0.5
 
-        if self._using_coupled:
-            return self._c_coupled.compute_action(
-                t, q_current_rad, qdot_current, q_target_rad, qdot_target,
-            )
-        else:
-            return self._decoupled.compute_action(
-                t, q_current_rad, qdot_current, q_target_rad, qdot_target,
-            )
+        decoupled = self._decoupled.compute_action(
+            t, q_current_rad, qdot_current, q_target_rad, qdot_target,
+        )
+        coupled = self._c_coupled.compute_action(
+            t, q_current_rad, qdot_current, q_target_rad, qdot_target,
+        )
+        return ((1.0 - self._current_weight) * decoupled) + (self._current_weight * coupled)
 
     def _compute_entropy(self, q_rad: np.ndarray) -> float:
         """Compute von Neumann entropy S(rho_L) of left-arm subsystem.
@@ -234,6 +242,17 @@ class SAdaptiveController(BaseController):
         sv2 = sv2 / sv2.sum()
         S = -np.sum(sv2 * np.log2(sv2 + 1e-15))
         return float(S)
+
+    def _blend_weight(self, entropy: float) -> float:
+        half_width = 0.5 * self.transition_width
+        lower = self.s_threshold - half_width
+        upper = self.s_threshold + half_width
+        if entropy <= lower:
+            return 0.0
+        if entropy >= upper:
+            return 1.0
+        alpha = (entropy - lower) / max(upper - lower, 1e-9)
+        return float(alpha * alpha * (3.0 - 2.0 * alpha))
 
 
 # ── Factory ──────────────────────────────────────────────────────────────────
