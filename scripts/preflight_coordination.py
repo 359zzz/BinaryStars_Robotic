@@ -19,6 +19,11 @@ from bsreal.experiment.trajectory import get_start_positions_deg, COORDINATION_C
 
 GRIPPER_HOLD_KP = {"gripper": 8.0}
 GRIPPER_HOLD_KD = {"gripper": 0.2}
+PREFLIGHT_SYNC_STEP_DEG = 2.0
+PREFLIGHT_SYNC_HOLD_S = 0.8
+PREFLIGHT_SYNC_RETURN_S = 0.5
+PREFLIGHT_SYNC_MAX_ATTEMPTS = 2
+PREFLIGHT_SYNC_MIN_DELTA_DEG = 0.5
 
 
 def _openarm_dual_gripper_targets(robot) -> tuple[float, float]:
@@ -74,6 +79,19 @@ def _send_dual_gripper_pair_repeated(
         robot.send_action(cmd)
 
 
+def _send_joint_targets_repeated(
+    robot,
+    cmd: dict[str, float],
+    duration_s: float = 0.8,
+    dt: float = 0.05,
+):
+    n_steps = max(int(duration_s / dt), 1)
+    for _ in range(n_steps):
+        robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
+        time.sleep(dt)
+    robot.send_action(cmd, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
+
+
 def _park_openarm_dual_grippers_closed(robot):
     _, gripper_close = _openarm_dual_gripper_targets(robot)
     _send_dual_gripper_repeated(robot, gripper_close, duration_s=0.8, soft_hold=False)
@@ -85,6 +103,65 @@ def _write_summary(path: str | None, payload: dict[str, object]) -> None:
     summary_path = Path(path)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _run_sync_micro_motion(
+    robot,
+    *,
+    all_joints: list[str],
+    step_deg: float,
+    sync_error_threshold_deg: float,
+    max_attempts: int = PREFLIGHT_SYNC_MAX_ATTEMPTS,
+) -> tuple[dict[str, float], dict[str, object]]:
+    attempts: list[dict[str, float | bool | int]] = []
+    base_cmd: dict[str, float] = {}
+    final_metrics: dict[str, object] = {}
+
+    for attempt_index in range(max_attempts):
+        obs = robot.get_observation()
+        base_cmd = {f"{jn}.pos": float(obs.get(f"{jn}.pos", 0.0)) for jn in all_joints}
+        base_cmd["right_gripper.pos"] = float(obs.get("right_gripper.pos", 0.0))
+        base_cmd["left_gripper.pos"] = float(obs.get("left_gripper.pos", 0.0))
+
+        target = dict(base_cmd)
+        target["right_joint_2.pos"] = base_cmd["right_joint_2.pos"] + step_deg
+        target["left_joint_2.pos"] = base_cmd["left_joint_2.pos"] + step_deg
+        _send_joint_targets_repeated(robot, target, duration_s=PREFLIGHT_SYNC_HOLD_S)
+
+        obs2 = robot.get_observation()
+        dr = float(obs2.get("right_joint_2.pos", 0.0)) - float(obs.get("right_joint_2.pos", 0.0))
+        dl = float(obs2.get("left_joint_2.pos", 0.0)) - float(obs.get("left_joint_2.pos", 0.0))
+        sync_error = abs(dr - dl)
+        sync_ok = (
+            sync_error < float(sync_error_threshold_deg)
+            and abs(dr) > PREFLIGHT_SYNC_MIN_DELTA_DEG
+            and abs(dl) > PREFLIGHT_SYNC_MIN_DELTA_DEG
+        )
+        attempt_metrics: dict[str, float | bool | int] = {
+            "attempt_index": attempt_index + 1,
+            "right_delta_deg": dr,
+            "left_delta_deg": dl,
+            "sync_error_deg": sync_error,
+            "sync_ok": sync_ok,
+        }
+        attempts.append(attempt_metrics)
+        final_metrics = dict(attempt_metrics)
+
+        _send_joint_targets_repeated(robot, base_cmd, duration_s=PREFLIGHT_SYNC_RETURN_S)
+
+        if sync_ok:
+            break
+
+        if attempt_index + 1 < max_attempts:
+            print(
+                "  WARNING: sync micro-motion did not latch cleanly; retrying once "
+                f"(attempt {attempt_index + 2}/{max_attempts})..."
+            )
+            time.sleep(0.2)
+
+    final_metrics["attempts"] = attempts
+    final_metrics["attempt_count"] = len(attempts)
+    return base_cmd, final_metrics
 
 
 def preflight_openarm_dual(
@@ -199,36 +276,22 @@ def preflight_openarm_dual(
 
     # Step 5: Small synchronized motion
     print("[5/6] Synchronized micro-motion (joint_2 +2 deg both arms)...")
-    base = {f"{jn}.pos": obs.get(f"{jn}.pos", 0.0) for jn in all_joints}
-    base["right_gripper.pos"] = initial_rg
-    base["left_gripper.pos"] = initial_lg
-    target = dict(base)
-    target["right_joint_2.pos"] = base["right_joint_2.pos"] + 2.0
-    target["left_joint_2.pos"] = base["left_joint_2.pos"] + 2.0
-    robot.send_action(target, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
-    time.sleep(0.8)
-
-    obs2 = robot.get_observation()
-    dr = obs2.get("right_joint_2.pos", 0.0) - obs.get("right_joint_2.pos", 0.0)
-    dl = obs2.get("left_joint_2.pos", 0.0) - obs.get("left_joint_2.pos", 0.0)
+    base, sync_metrics = _run_sync_micro_motion(
+        robot,
+        all_joints=all_joints,
+        step_deg=PREFLIGHT_SYNC_STEP_DEG,
+        sync_error_threshold_deg=float(sync_error_threshold_deg),
+    )
+    dr = float(sync_metrics["right_delta_deg"])
+    dl = float(sync_metrics["left_delta_deg"])
     print(f"  Right delta={dr:+.2f}  Left delta={dl:+.2f} deg")
-
-    # Return
-    robot.send_action(base, custom_kp=GRIPPER_HOLD_KP, custom_kd=GRIPPER_HOLD_KD)
-    time.sleep(0.5)
-
-    sync_error = abs(dr - dl)
-    sync_ok = sync_error < float(sync_error_threshold_deg) and abs(dr) > 0.5
+    sync_error = float(sync_metrics["sync_error_deg"])
+    sync_ok = bool(sync_metrics["sync_ok"])
     if sync_ok:
         print(f"  OK: synchronized (sync error = {sync_error:.2f} deg)")
     else:
         print(f"  WARNING: sync error = {sync_error:.2f} deg")
-    summary["sync_check"] = {
-        "right_delta_deg": dr,
-        "left_delta_deg": dl,
-        "sync_error_deg": sync_error,
-        "sync_ok": sync_ok,
-    }
+    summary["sync_check"] = sync_metrics
 
     # Step 6: Trajectory preview
     print(f"[6/6] Trajectory preview ({preview_config} config)...")
