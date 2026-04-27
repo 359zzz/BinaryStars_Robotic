@@ -55,6 +55,10 @@ WRIST_STABILIZE_KP_CAP = 60.0
 WRIST_STABILIZE_KD_CAP = 0.90
 START_POSE_CORRECTION_DURATION_S = 1.8
 START_POSE_CORRECTION_SETTLE_S = 0.4
+START_POSE_MAX_ERROR_DEG = 20.0
+PRETRIAL_PASSIVE_SETTLE_ADAPT_ERROR_DEG = START_POSE_MAX_ERROR_DEG
+GRIPPER_OPEN_READY_MIN_FRACTION = 0.70
+GRIPPER_OPEN_READY_MAX_ASYM_DEG = 10.0
 CONTACT_SETTLED_PASSIVE_JOINTS = {"joint_5"}
 CONTACT_SETTLE_ADAPT_ERROR_DEG = 30.0
 
@@ -272,7 +276,7 @@ def _stabilize_arm_pose_if_needed(
     active_gripper_cmd: dict[str, float],
     custom_kp: dict[str, float] | None,
     custom_kd: dict[str, float] | None,
-    max_error_deg: float = 20.0,
+    max_error_deg: float = START_POSE_MAX_ERROR_DEG,
     max_attempts: int = 4,
 ) -> dict[str, object]:
     first_key, first_error, first_current, first_target = _worst_pose_error(robot, arm_hold_cmd)
@@ -383,23 +387,107 @@ def _gripper_progress_toward_target(
     return float((position - open_target) / stroke)
 
 
+def _gripper_position_snapshot(robot, *, fallback: float) -> dict[str, float]:
+    obs = robot.get_observation()
+    return {
+        "right_gripper.pos": float(obs.get("right_gripper.pos", fallback)),
+        "left_gripper.pos": float(obs.get("left_gripper.pos", fallback)),
+    }
+
+
+def _gripper_open_state_sufficient(
+    robot,
+    *,
+    open_target: float,
+    close_target: float,
+    min_fraction: float = GRIPPER_OPEN_READY_MIN_FRACTION,
+    max_asym_deg: float = GRIPPER_OPEN_READY_MAX_ASYM_DEG,
+) -> tuple[bool, dict[str, float]]:
+    positions = _gripper_position_snapshot(robot, fallback=close_target)
+    required_delta = max(4.0, abs(close_target - open_target) * min_fraction)
+    opened = {
+        key: abs(value - close_target)
+        for key, value in positions.items()
+    }
+    asym_deg = abs(positions["right_gripper.pos"] - positions["left_gripper.pos"])
+    if all(delta >= required_delta for delta in opened.values()) and asym_deg <= max_asym_deg:
+        return True, positions
+
+    logger.warning(
+        "Gripper open state below threshold: "
+        "right=%.2fdeg left=%.2fdeg opened_from_close=(%.2f, %.2f) "
+        "required>=%.2fdeg max_asym<=%.2fdeg actual_asym=%.2fdeg",
+        positions["right_gripper.pos"],
+        positions["left_gripper.pos"],
+        opened["right_gripper.pos"],
+        opened["left_gripper.pos"],
+        required_delta,
+        max_asym_deg,
+        asym_deg,
+    )
+    return False, positions
+
+
+def _ensure_grippers_open_for_loading(
+    robot,
+    *,
+    open_target: float,
+    close_target: float,
+    open_latch_kp=None,
+    open_latch_kd=None,
+    arm_hold_cmd: dict[str, float] | None = None,
+) -> dict[str, float]:
+    ok, positions = _gripper_open_state_sufficient(
+        robot,
+        open_target=open_target,
+        close_target=close_target,
+    )
+    if ok:
+        return positions
+
+    logger.warning(
+        "Retrying gripper open command because one or both grippers are not in the loading-open state."
+    )
+    _send_gripper_repeated(
+        robot,
+        open_target,
+        duration_s=0.8,
+        custom_kp=open_latch_kp,
+        custom_kd=open_latch_kd,
+        arm_hold_cmd=arm_hold_cmd,
+    )
+    ok, positions = _gripper_open_state_sufficient(
+        robot,
+        open_target=open_target,
+        close_target=close_target,
+    )
+    if ok:
+        return positions
+
+    raise SafetyError(
+        "Grippers did not both reach the open loading state. "
+        "Check for packet drops or a blocked gripper before placing the payload."
+    )
+
+
 def _gripper_close_motion_sufficient(
     robot,
     *,
     open_target: float,
     close_target: float,
+    start_positions: dict[str, float] | None = None,
     min_fraction: float = 0.12,
     min_delta_deg: float = 4.0,
 ) -> bool:
-    obs = robot.get_observation()
-    required_delta = max(min_delta_deg, abs(close_target - open_target) * min_fraction)
-    positions = {
-        "right_gripper.pos": obs.get("right_gripper.pos", open_target),
-        "left_gripper.pos": obs.get("left_gripper.pos", open_target),
+    positions = _gripper_position_snapshot(robot, fallback=open_target)
+    reference_positions = {
+        key: float((start_positions or {}).get(key, open_target))
+        for key in positions
     }
+    required_delta = max(min_delta_deg, abs(close_target - open_target) * min_fraction)
     moved = {
-        key: abs(value - open_target)
-        for key, value in positions.items()
+        key: abs(positions[key] - reference_positions[key])
+        for key in positions
     }
     progress = {
         key: _gripper_progress_toward_target(value, open_target, close_target)
@@ -410,9 +498,12 @@ def _gripper_close_motion_sufficient(
 
     logger.warning(
         "Gripper close motion below threshold: "
-        "right=%.2fdeg (%.2f) left=%.2fdeg (%.2f) required>=%.2fdeg",
+        "right=%.2fdeg from_start=%.2fdeg (%.2f) "
+        "left=%.2fdeg from_start=%.2fdeg (%.2f) required>=%.2fdeg",
+        positions["right_gripper.pos"],
         moved["right_gripper.pos"],
         progress["right_gripper.pos"],
+        positions["left_gripper.pos"],
         moved["left_gripper.pos"],
         progress["left_gripper.pos"],
         required_delta,
@@ -425,6 +516,7 @@ def _close_grippers_with_escalation(
     *,
     open_target: float,
     close_target: float,
+    start_positions: dict[str, float] | None = None,
     close_stages: list[tuple[dict[str, float] | None, dict[str, float] | None, float]],
     open_latch_kp=None,
     open_latch_kd=None,
@@ -432,6 +524,8 @@ def _close_grippers_with_escalation(
     hold_kd=None,
     arm_hold_cmd: dict[str, float] | None = None,
 ) -> dict[str, float]:
+    if start_positions is None:
+        start_positions = _gripper_position_snapshot(robot, fallback=open_target)
     for attempt_index in range(2):
         for stage_index, (stage_kp, stage_kd, duration_s) in enumerate(close_stages, start=1):
             _send_gripper_repeated(
@@ -446,6 +540,7 @@ def _close_grippers_with_escalation(
                 robot,
                 open_target=open_target,
                 close_target=close_target,
+                start_positions=start_positions,
             ):
                 logger.info(
                     "Gripper close attempt %d stage %d succeeded",
@@ -482,6 +577,14 @@ def _close_grippers_with_escalation(
                 "\n>>> Grippers still did not close enough. Re-seat the bar and press ENTER to retry close...",
                 custom_kp=hold_kp,
                 custom_kd=hold_kd,
+                arm_hold_cmd=arm_hold_cmd,
+            )
+            start_positions = _ensure_grippers_open_for_loading(
+                robot,
+                open_target=open_target,
+                close_target=close_target,
+                open_latch_kp=open_latch_kp,
+                open_latch_kd=open_latch_kd,
                 arm_hold_cmd=arm_hold_cmd,
             )
             continue
@@ -681,6 +784,14 @@ def run_coordination_trial(
             custom_kd=gripper_open_latch_kd,
             arm_hold_cmd=arm_hold_cmd,
         )
+        _ensure_grippers_open_for_loading(
+            robot,
+            open_target=gripper_open,
+            close_target=gripper_close,
+            open_latch_kp=gripper_open_latch_kp,
+            open_latch_kd=gripper_open_latch_kd,
+            arm_hold_cmd=arm_hold_cmd,
+        )
         _hold_gripper_target_until_enter(
             robot,
             gripper_open,
@@ -693,6 +804,14 @@ def run_coordination_trial(
             custom_kd=gripper_hold_kd,
             arm_hold_cmd=arm_hold_cmd,
         )
+        pre_close_positions = _ensure_grippers_open_for_loading(
+            robot,
+            open_target=gripper_open,
+            close_target=gripper_close,
+            open_latch_kp=gripper_open_latch_kp,
+            open_latch_kd=gripper_open_latch_kd,
+            arm_hold_cmd=arm_hold_cmd,
+        )
         print("  Grippers closing...")
         if controller.robot_type == "openarm":
             contact_nominal_targets: dict[str, float] = {}
@@ -700,6 +819,7 @@ def run_coordination_trial(
                 robot,
                 open_target=gripper_open,
                 close_target=gripper_close,
+                start_positions=pre_close_positions,
                 close_stages=gripper_close_stages,
                 open_latch_kp=gripper_open_latch_kp,
                 open_latch_kd=gripper_open_latch_kd,
@@ -720,7 +840,11 @@ def run_coordination_trial(
             for key in arm_hold_cmd:
                 if _joint_suffix_from_action_key(key) in CONTACT_SETTLED_PASSIVE_JOINTS:
                     contact_nominal_targets[key] = float(arm_hold_cmd[key])
-            contact_adapted = _adapt_contact_settled_passive_joints(robot, arm_hold_cmd)
+            contact_adapted = _adapt_contact_settled_passive_joints(
+                robot,
+                arm_hold_cmd,
+                min_error_deg=PRETRIAL_PASSIVE_SETTLE_ADAPT_ERROR_DEG,
+            )
             if contact_adapted:
                 result.contact_settled_passive_joint_targets = {
                     key: float(value) for key, value in contact_adapted.items()

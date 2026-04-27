@@ -32,11 +32,13 @@ from bsreal.experiment.coordination import (
     _close_grippers_with_escalation,
     _adapt_contact_settled_passive_joints,
     _current_dual_gripper_cmd,
+    _ensure_grippers_open_for_loading,
     _gripper_targets,
     _hold_gripper_target_until_enter,
     _openarm_object_hold_gains,
     _send_gripper_repeated,
     _stabilize_arm_pose_if_needed,
+    PRETRIAL_PASSIVE_SETTLE_ADAPT_ERROR_DEG,
 )
 from bsreal.experiment.perturbation import _get_observation_with_retry, _send_action_with_retry
 from bsreal.experiment.safety import SafetyError, check_position_error, emergency_freeze, slow_move
@@ -144,6 +146,14 @@ def _prepare_object_if_needed(
         custom_kd=GRIPPER_OPEN_LATCH_KD,
         arm_hold_cmd=arm_hold_cmd,
     )
+    _ensure_grippers_open_for_loading(
+        robot,
+        open_target=gripper_open,
+        close_target=gripper_close,
+        open_latch_kp=GRIPPER_OPEN_LATCH_KP,
+        open_latch_kd=GRIPPER_OPEN_LATCH_KD,
+        arm_hold_cmd=arm_hold_cmd,
+    )
     _hold_gripper_target_until_enter(
         robot,
         gripper_open,
@@ -155,11 +165,20 @@ def _prepare_object_if_needed(
         custom_kd=hold_kd,
         arm_hold_cmd=arm_hold_cmd,
     )
+    pre_close_positions = _ensure_grippers_open_for_loading(
+        robot,
+        open_target=gripper_open,
+        close_target=gripper_close,
+        open_latch_kp=GRIPPER_OPEN_LATCH_KP,
+        open_latch_kd=GRIPPER_OPEN_LATCH_KD,
+        arm_hold_cmd=arm_hold_cmd,
+    )
     print("  Grippers closing...")
     active_gripper_cmd = _close_grippers_with_escalation(
         robot,
         open_target=gripper_open,
         close_target=gripper_close,
+        start_positions=pre_close_positions,
         close_stages=close_stages,
         open_latch_kp=GRIPPER_OPEN_LATCH_KP,
         open_latch_kd=GRIPPER_OPEN_LATCH_KD,
@@ -177,7 +196,11 @@ def _prepare_object_if_needed(
         custom_kd=hold_kd,
     )
     time.sleep(0.3)
-    _adapt_contact_settled_passive_joints(robot, arm_hold_cmd)
+    _adapt_contact_settled_passive_joints(
+        robot,
+        arm_hold_cmd,
+        min_error_deg=PRETRIAL_PASSIVE_SETTLE_ADAPT_ERROR_DEG,
+    )
     _stabilize_arm_pose_if_needed(
         robot,
         arm_hold_cmd=arm_hold_cmd,
